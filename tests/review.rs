@@ -2,9 +2,12 @@ mod common;
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use common::child;
 use ncli::commands::review::{Reviewer, debate};
+use ncli::error::Error;
+use ncli::process::Cancellation;
 use tempfile::TempDir;
 
 const LINK: &str = "https://github.com/owner/repo/pull/1";
@@ -40,11 +43,18 @@ fn prompts(dir: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
+fn run_debate(reviewers: &[Reviewer], judge: &Reviewer) -> (Result<(), Error>, String) {
+    let mut out = Vec::new();
+    let result = debate(LINK, reviewers, judge, &Cancellation::default(), &mut out);
+    (result, String::from_utf8(out).unwrap())
+}
+
 #[test]
 fn reviewers_review_rebut_and_judge() {
     let dir = TempDir::new().unwrap();
     let reviewers = reviewers(dir.path());
-    let transcript = debate(LINK, &reviewers, &reviewers[1]).unwrap();
+    let (result, transcript) = run_debate(&reviewers, &reviewers[1]);
+    result.unwrap();
 
     let [review, rebuttal] = &prompts(dir.path(), "a")[..] else {
         panic!("a should be asked twice");
@@ -67,21 +77,51 @@ fn reviewers_review_rebut_and_judge() {
     let position = |section: &str| transcript.find(section).unwrap();
     assert!(position("## Review: a") < position("## Rebuttal: a"));
     assert!(position("## Rebuttal: c") < position("## Verdict: b"));
-    assert!(transcript.ends_with("## Verdict: b\n\nb answer 2"));
+    assert!(transcript.ends_with("## Rebuttal: c\n\nc answer 1\n\n## Verdict: b\n\nb answer 2\n"));
 }
 
 #[test]
-fn failing_reviewer_fails_the_debate() {
-    let dir = TempDir::new().unwrap();
-    let mut reviewers = reviewers(dir.path());
-    reviewers.push(reviewer("broken", &["fail", "3", "not logged in"]));
-    let error = debate(LINK, &reviewers, &reviewers[0]).unwrap_err();
+fn failing_reviewer_stops_the_others() {
+    let reviewers = [
+        reviewer("slow", &["sleep", "30"]),
+        reviewer("broken", &["fail", "3", "not logged in"]),
+    ];
+    let started = Instant::now();
+    let (result, transcript) = run_debate(&reviewers, &reviewers[0]);
     assert!(
-        error
+        result
+            .unwrap_err()
             .to_string()
             .ends_with("exited with code 3: not logged in")
     );
-    assert_eq!(prompts(dir.path(), "a").len(), 1);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(transcript.is_empty());
+}
+
+#[test]
+fn finished_stages_are_kept_when_the_judge_fails() {
+    let dir = TempDir::new().unwrap();
+    let reviewers = reviewers(dir.path());
+    let judge = reviewer("judge", &["fail", "3", "out of credits"]);
+    let (result, transcript) = run_debate(&reviewers, &judge);
+    assert!(result.is_err());
+    assert!(transcript.contains("## Review: a\n\na answer 0"));
+    assert!(transcript.ends_with("## Rebuttal: c\n\nc answer 1\n"));
+}
+
+#[test]
+fn every_call_runs_in_its_own_working_directory() {
+    let reviewers = [reviewer("a", &["cwd"]), reviewer("b", &["cwd"])];
+    let (result, transcript) = run_debate(&reviewers, &reviewers[0]);
+    result.unwrap();
+    let mut dirs: Vec<&str> = transcript
+        .lines()
+        .filter(|line| line.contains("ncli-review-"))
+        .collect();
+    assert_eq!(dirs.len(), 5);
+    dirs.sort();
+    dirs.dedup();
+    assert_eq!(dirs.len(), 5);
 }
 
 #[cfg(unix)]
@@ -133,7 +173,7 @@ echo "$(basename "$0") answer $n"
 
     #[test]
     fn failing_reviewer_error_is_reported() {
-        let broken = "#!/bin/sh\necho 'not logged in' >&2\nexit 3\n";
+        let broken = "#!/bin/sh\nkill -TERM $$\n";
         let output = run_ncli(
             &[("claude", FAKE_REVIEWER), ("codex", broken)],
             &["review", LINK],
@@ -141,7 +181,7 @@ echo "$(basename "$0") answer $n"
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert!(output.stdout.is_empty());
         let err = String::from_utf8(output.stderr).unwrap();
-        assert!(err.contains("ncli review: error: codex exited with code 3: not logged in"));
-        assert!(err.contains("ncli: codex (attempt 3/3) failed: "));
+        assert!(err.contains("ncli review: error: codex was killed by signal 15"));
+        assert!(err.contains("ncli: codex (attempt 1/3) failed: "));
     }
 }

@@ -1,7 +1,8 @@
 mod prompts;
 mod reviewers;
 
-use std::path::Path;
+use std::io::{self, Write};
+use std::sync::mpsc;
 use std::thread;
 
 use clap::{Args, ValueEnum};
@@ -9,7 +10,7 @@ use clap::{Args, ValueEnum};
 pub use reviewers::{Reviewer, ReviewerKind};
 
 use crate::error::Error;
-use crate::process::{self, ProcessError};
+use crate::process::{self, Cancellation};
 
 type Answers<'a> = Vec<(&'a str, String)>;
 type Section<'a> = (String, &'a str);
@@ -25,26 +26,34 @@ pub struct Review {
 }
 
 impl Review {
-    pub fn run(&self) -> Result<(), Error> {
+    pub fn run(&self, cancellation: &Cancellation) -> Result<(), Error> {
         let reviewers: Vec<Reviewer> = ReviewerKind::value_variants()
             .iter()
             .map(|kind| kind.reviewer())
             .collect();
         process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
         let judge = self.judge.reviewer();
-        println!("{}", debate(&self.link, &reviewers, &judge)?);
-        Ok(())
+        debate(
+            &self.link,
+            &reviewers,
+            &judge,
+            cancellation,
+            &mut io::stdout(),
+        )
     }
 }
 
-pub fn debate(link: &str, reviewers: &[Reviewer], judge: &Reviewer) -> Result<String, Error> {
-    let tmp = tempfile::Builder::new()
-        .prefix("ncli-review-")
-        .tempdir()
-        .map_err(Error::WorkingDirectory)?;
-    let workdir = tmp.path();
-    let reviews = ask_all(reviewers, workdir, "review", |_| prompts::review(link))?;
-    let rebuttals = ask_all(reviewers, workdir, "rebuttal", |name| {
+pub fn debate(
+    link: &str,
+    reviewers: &[Reviewer],
+    judge: &Reviewer,
+    cancellation: &Cancellation,
+    out: &mut impl Write,
+) -> Result<(), Error> {
+    let reviews = ask_all(reviewers, "review", cancellation, |_| prompts::review(link))?;
+    let mut debate = sections("Review", &reviews);
+    emit(out, "", &debate)?;
+    let rebuttals = ask_all(reviewers, "rebuttal", cancellation, |name| {
         let own = reviews
             .iter()
             .find(|(other, _)| *other == name)
@@ -53,12 +62,22 @@ pub fn debate(link: &str, reviewers: &[Reviewer], judge: &Reviewer) -> Result<St
         let others = sections("Review", reviews.iter().filter(|(other, _)| *other != name));
         prompts::rebuttal(link, own, &transcript(&others))
     })?;
-    let mut debate = sections("Review", &reviews);
-    debate.extend(sections("Rebuttal", &rebuttals));
+    let rebuttals = sections("Rebuttal", &rebuttals);
+    emit(out, "\n", &rebuttals)?;
+    debate.extend(rebuttals);
     progress("verdict");
-    let verdict = judge.ask(&prompts::judge(link, &transcript(&debate)), workdir)?;
-    debate.push((format!("Verdict: {}", judge.name), &verdict));
-    Ok(transcript(&debate))
+    let verdict = judge.ask(&prompts::judge(link, &transcript(&debate)), cancellation)?;
+    emit(
+        out,
+        "\n",
+        &[(format!("Verdict: {}", judge.name), verdict.as_str())],
+    )
+}
+
+fn emit(out: &mut impl Write, separator: &str, sections: &[Section]) -> Result<(), Error> {
+    writeln!(out, "{separator}{}", transcript(sections))
+        .and_then(|()| out.flush())
+        .map_err(Error::Output)
 }
 
 fn transcript(sections: &[Section]) -> String {
@@ -85,25 +104,56 @@ fn progress(stage: &str) {
 
 fn ask_all<'a>(
     reviewers: &'a [Reviewer],
-    workdir: &Path,
     stage: &str,
+    cancellation: &Cancellation,
     prompt_for: impl Fn(&str) -> String + Sync,
-) -> Result<Answers<'a>, ProcessError> {
+) -> Result<Answers<'a>, Error> {
     progress(stage);
+    let stage_cancellation = cancellation.child();
     thread::scope(|scope| {
-        let handles: Vec<_> = reviewers
+        let (sender, answered) = mpsc::channel();
+        let threads: Vec<_> = reviewers
             .iter()
-            .map(|reviewer| scope.spawn(|| reviewer.ask(&prompt_for(&reviewer.name), workdir)))
-            .collect();
-        reviewers
-            .iter()
-            .zip(handles)
-            .map(|(reviewer, handle)| {
-                let answer = handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-                Ok((reviewer.name.as_str(), answer))
+            .enumerate()
+            .map(|(index, reviewer)| {
+                let sender = sender.clone();
+                let (prompt_for, stage_cancellation) = (&prompt_for, &stage_cancellation);
+                scope.spawn(move || {
+                    let answer = reviewer.ask(&prompt_for(&reviewer.name), stage_cancellation);
+                    let _ = sender.send((index, answer));
+                })
             })
-            .collect()
+            .collect();
+        drop(sender);
+        let mut answers: Vec<Option<String>> = reviewers.iter().map(|_| None).collect();
+        let mut failure = None;
+        for (index, answer) in answered {
+            match answer {
+                Ok(answer) => answers[index] = Some(answer),
+                Err(error) if failure.is_none() => {
+                    stage_cancellation.cancel();
+                    failure = Some(error);
+                }
+                Err(_) => {}
+            }
+        }
+        for thread in threads {
+            thread
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(reviewers
+            .iter()
+            .zip(answers)
+            .map(|(reviewer, answer)| {
+                (
+                    reviewer.name.as_str(),
+                    answer.expect("every reviewer answered"),
+                )
+            })
+            .collect())
     })
 }

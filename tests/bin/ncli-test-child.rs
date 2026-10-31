@@ -4,6 +4,8 @@ use std::process::{Command, ExitCode};
 use std::time::Duration;
 use std::{env, fs, thread};
 
+const OUTLIVE: Duration = Duration::from_secs(2);
+
 fn sleep(seconds: &str) {
     thread::sleep(Duration::from_secs(seconds.parse().unwrap()));
 }
@@ -44,10 +46,43 @@ fn main() -> ExitCode {
             fs::write(Path::new(dir).join(format!("{prefix}{asked}")), prompt).unwrap();
             println!("{name} answer {asked}");
         }
-        ["sleep", seconds] => sleep(seconds),
-        ["spawn-and-wait", seconds] => {
+        ["cwd"] => print!("{}", env::current_dir().unwrap().display()),
+        ["bytes"] => {
+            let mut input = Vec::new();
+            io::stdin().read_to_end(&mut input).unwrap();
+            print!("{input:?}");
+        }
+        ["outlive", dir] => {
+            fs::write(Path::new(dir).join("started"), "").unwrap();
+            thread::sleep(OUTLIVE);
+            fs::write(Path::new(dir).join("survived"), "").unwrap();
+        }
+        ["spawn-and-exit", dir] => {
+            #[expect(
+                clippy::zombie_processes,
+                reason = "the grandchild must outlive this process"
+            )]
             Command::new(env::current_exe().unwrap())
-                .args(["sleep", seconds])
+                .args(["outlive", dir])
+                .spawn()
+                .unwrap();
+        }
+        ["escape", seconds] => {
+            let mut grandchild = Command::new(env::current_exe().unwrap());
+            grandchild.args(["sleep", seconds]);
+            #[cfg(unix)]
+            std::os::unix::process::CommandExt::process_group(&mut grandchild, 0);
+            #[expect(
+                clippy::zombie_processes,
+                reason = "the sleeper must outlive this process"
+            )]
+            grandchild.spawn().unwrap();
+            print!("done");
+        }
+        ["sleep", seconds] => sleep(seconds),
+        ["spawn-and-wait", dir] => {
+            Command::new(env::current_exe().unwrap())
+                .args(["outlive", dir])
                 .status()
                 .unwrap();
         }

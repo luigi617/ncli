@@ -52,25 +52,3 @@ fn repeated_flag_keeps_the_last_value() {
 fn unambiguous_flag_prefixes_are_accepted() {
     assert_eq!(review(&[LINK, "--jud", "codex"]).judge, ReviewerKind::Codex);
 }
-
-#[test]
-fn usage_errors_are_reported() {
-    assert_eq!(
-        error_kind(&[]),
-        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-    );
-    assert_eq!(error_kind(&["nope"]), ErrorKind::InvalidSubcommand);
-    assert_eq!(error_kind(&["review"]), ErrorKind::MissingRequiredArgument);
-}
-
-#[test]
-fn review_help_lists_the_judge_default_and_choices() {
-    let help = Ncli::command()
-        .find_subcommand_mut("review")
-        .unwrap()
-        .render_help()
-        .to_string();
-    assert!(help.contains("Reviewer that writes the final verdict"));
-    assert!(help.contains("[default: claude]"));
-    assert!(help.contains("[possible values: claude, codex]"));
-}

@@ -102,3 +102,42 @@ pub fn path_with(names: &[&str]) -> PathWith {
     unsafe { env::set_var("PATH", dir.path()) };
     PathWith { dir, _lock: lock }
 }
+
+pub struct Grandchild {
+    dir: TempDir,
+}
+
+impl Grandchild {
+    pub fn new() -> Self {
+        Self {
+            dir: TempDir::new().unwrap(),
+        }
+    }
+
+    pub fn dir(&self) -> &str {
+        self.dir.path().to_str().unwrap()
+    }
+
+    pub fn started(&self) -> bool {
+        self.dir.path().join("started").exists()
+    }
+
+    pub fn wait_until_started(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self.started() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the grandchild never started"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    pub fn assert_killed(&self) {
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            !self.dir.path().join("survived").exists(),
+            "the grandchild outlived the call"
+        );
+    }
+}

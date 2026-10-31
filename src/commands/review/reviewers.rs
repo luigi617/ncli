@@ -1,9 +1,9 @@
-use std::path::Path;
 use std::time::Duration;
 
 use clap::ValueEnum;
 
-use crate::process::{Cli, ProcessError, StderrTracer};
+use crate::error::Error;
+use crate::process::{Cancellation, Cli, StderrTracer};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ReviewerKind {
@@ -53,7 +53,13 @@ pub struct Reviewer {
 }
 
 impl Reviewer {
-    pub fn ask(&self, prompt: &str, cwd: &Path) -> Result<String, ProcessError> {
-        self.cli.run(Some(prompt), Some(cwd))
+    pub fn ask(&self, prompt: &str, cancellation: &Cancellation) -> Result<String, Error> {
+        let workdir = tempfile::Builder::new()
+            .prefix("ncli-review-")
+            .tempdir()
+            .map_err(Error::WorkingDirectory)?;
+        Ok(self
+            .cli
+            .run(Some(prompt), Some(workdir.path()), cancellation)?)
     }
 }

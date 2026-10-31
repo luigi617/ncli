@@ -5,7 +5,8 @@ use std::process::ExitCode;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
 use crate::commands::Command;
-use crate::process;
+use crate::error::Error;
+use crate::process::Cancellation;
 
 pub const INTERRUPTED: u8 = 130;
 
@@ -30,9 +31,9 @@ where
 {
     let matches = Ncli::command().get_matches_from(argv);
     let ncli = Ncli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    ctrlc::set_handler(process::cancel).expect("failed to install the interrupt handler");
-    let result = ncli.command.run();
-    if process::is_cancelled() {
+    let cancellation = Cancellation::global();
+    let result = install_interrupt_handler().and_then(|()| ncli.command.run(cancellation));
+    if cancellation.is_cancelled() {
         return ExitCode::from(INTERRUPTED);
     }
     match result {
@@ -42,6 +43,17 @@ where
             ExitCode::from(error.exit_code())
         }
     }
+}
+
+fn install_interrupt_handler() -> Result<(), Error> {
+    ctrlc::set_handler(|| {
+        let cancellation = Cancellation::global();
+        if cancellation.is_cancelled() {
+            std::process::exit(INTERRUPTED.into());
+        }
+        cancellation.cancel();
+    })?;
+    Ok(())
 }
 
 fn prog(matches: &ArgMatches) -> String {

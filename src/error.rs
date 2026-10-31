@@ -9,6 +9,10 @@ pub enum Error {
     MissingExecutables(Vec<OsString>),
     #[error("could not create a working directory: {0}")]
     WorkingDirectory(#[source] io::Error),
+    #[error("could not write the output: {0}")]
+    Output(#[source] io::Error),
+    #[error("could not install the interrupt handler: {0}")]
+    InterruptHandler(#[from] ctrlc::Error),
     #[error(transparent)]
     Process(#[from] ProcessError),
 }
@@ -20,7 +24,10 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::MissingExecutables(_) => Self::MISSING_EXECUTABLE,
-            Self::WorkingDirectory(_) | Self::Process(_) => Self::FAILURE,
+            Self::WorkingDirectory(_)
+            | Self::Output(_)
+            | Self::InterruptHandler(_)
+            | Self::Process(_) => Self::FAILURE,
         }
     }
 }

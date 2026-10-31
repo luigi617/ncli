@@ -1,33 +1,32 @@
+mod cancel;
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+use unix as sys;
+#[cfg(windows)]
+use windows as sys;
+
 use std::borrow::Cow;
-use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+
+pub use cancel::Cancellation;
 
 use crate::error::Error;
 
 const STDERR_TAIL_LINES: usize = 20;
-const LINE_SEPARATOR: &str = if cfg!(windows) { "\r\n" } else { "\n" };
-
-struct State {
-    cancelled: bool,
-    running: BTreeSet<u32>,
-}
-
-static STATE: Mutex<State> = Mutex::new(State {
-    cancelled: false,
-    running: BTreeSet::new(),
-});
-static CANCELLED: Condvar = Condvar::new();
-
-fn state() -> MutexGuard<'static, State> {
-    STATE.lock().unwrap_or_else(PoisonError::into_inner)
-}
+// Like Go's exec.Cmd.WaitDelay: after the child exits, a process that escaped its group may still
+// hold the output pipes open, so stop waiting for end-of-file after this long.
+const WAIT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProcessError {
@@ -37,6 +36,8 @@ pub enum ProcessError {
     Io { name: String, source: io::Error },
     #[error("{name} timed out after {}s", .timeout.as_secs_f64())]
     Timeout { name: String, timeout: Duration },
+    #[error("{name} was cancelled")]
+    Cancelled { name: String },
     #[error("{name} was killed by signal {signal}")]
     Signal { name: String, signal: i32 },
     #[error("{name} exited with code {code}{}", detail(.stderr_tail))]
@@ -75,77 +76,6 @@ pub fn require_executables<'a>(names: impl IntoIterator<Item = &'a OsStr>) -> Re
     }
 }
 
-pub fn cancel() {
-    let mut state = state();
-    state.cancelled = true;
-    for &pid in &state.running {
-        kill(pid);
-    }
-    CANCELLED.notify_all();
-}
-
-pub fn is_cancelled() -> bool {
-    state().cancelled
-}
-
-fn sleep_unless_cancelled(delay: Duration) -> bool {
-    let (state, _) = CANCELLED
-        .wait_timeout_while(state(), delay, |state| !state.cancelled)
-        .unwrap_or_else(PoisonError::into_inner);
-    state.cancelled
-}
-
-fn track(pid: u32) {
-    let mut state = state();
-    state.running.insert(pid);
-    if state.cancelled {
-        kill(pid);
-    }
-}
-
-fn untrack(pid: u32) {
-    state().running.remove(&pid);
-}
-
-#[cfg(unix)]
-fn new_group(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-#[cfg(windows)]
-fn new_group(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-}
-
-#[cfg(unix)]
-fn kill(pid: u32) {
-    unsafe {
-        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-    }
-}
-
-#[cfg(windows)]
-fn kill(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .stdin(Stdio::null())
-        .output();
-}
-
-#[cfg(unix)]
-fn signal(status: ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal()
-}
-
-#[cfg(windows)]
-fn signal(_: ExitStatus) -> Option<i32> {
-    None
-}
-
 pub struct Call<'a> {
     pub argv: &'a [OsString],
     pub attempt: u32,
@@ -171,7 +101,7 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn returncode(&self) -> i32 {
-        match signal(self.status) {
+        match sys::signal(self.status) {
             Some(signal) => -signal,
             None => self
                 .status
@@ -230,7 +160,7 @@ impl Tracer for StderrTracer {
 
 fn failure(call: &Call, outcome: &Outcome) -> ProcessError {
     let name = call.name().into_owned();
-    if let Some(signal) = signal(outcome.status) {
+    if let Some(signal) = sys::signal(outcome.status) {
         return ProcessError::Signal { name, signal };
     }
     let lines: Vec<&str> = outcome.stderr.trim().lines().collect();
@@ -247,48 +177,78 @@ fn universal_newlines(bytes: &[u8]) -> String {
         .replace('\r', "\n")
 }
 
-fn feed(mut stdin: ChildStdin, input: &str) -> io::Result<()> {
-    let input = input.replace('\n', LINE_SEPARATOR);
-    match stdin.write_all(input.as_bytes()) {
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        result => result,
+struct Capture {
+    output: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<io::Result<()>>,
+}
+
+impl Capture {
+    fn start(mut source: impl Read + Send + 'static) -> Self {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (sender, done) = mpsc::channel();
+        let sink = Arc::clone(&output);
+        thread::spawn(move || {
+            let mut chunk = [0; 8192];
+            let result = loop {
+                match source.read(&mut chunk) {
+                    Ok(0) => break Ok(()),
+                    Ok(read) => lock(&sink).extend_from_slice(&chunk[..read]),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = sender.send(result);
+        });
+        Self { output, done }
+    }
+
+    fn finish(self, deadline: Instant) -> io::Result<String> {
+        settle(&self.done, deadline)?;
+        Ok(universal_newlines(&lock(&self.output)))
     }
 }
 
-fn communicate(
-    mut child: Child,
-    input: Option<&str>,
-    timeout: Option<Duration>,
-) -> io::Result<Option<Output>> {
-    let pid = child.id();
+fn feed(mut stdin: ChildStdin, input: String) -> mpsc::Receiver<io::Result<()>> {
+    let (sender, done) = mpsc::channel();
+    thread::spawn(move || {
+        let result = match stdin.write_all(input.as_bytes()) {
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            result => result,
+        };
+        let _ = sender.send(result);
+    });
+    done
+}
+
+fn settle(done: &mpsc::Receiver<io::Result<()>>, deadline: Instant) -> io::Result<()> {
+    match done.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Ok(()),
+        Err(RecvTimeoutError::Disconnected) => panic!("a pipe thread panicked"),
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn wait_for_exit(child: &Child, group: &sys::Group, timeout: Option<Duration>) -> io::Result<bool> {
     thread::scope(|scope| {
-        let writer = child
-            .stdin
-            .take()
-            .zip(input)
-            .map(|(stdin, input)| scope.spawn(move || feed(stdin, input)));
-        let (sender, receiver) = mpsc::channel();
-        let waiter = scope.spawn(move || sender.send(child.wait_with_output()));
-        let received = match timeout {
-            Some(timeout) => receiver.recv_timeout(timeout),
-            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
-        };
-        let output = match received {
-            Ok(output) => Some(output?),
-            Err(RecvTimeoutError::Timeout) => {
-                kill(pid);
-                None
-            }
-            Err(RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
-                waiter
-                    .join()
-                    .expect_err("the waiter only disconnects by panicking"),
-            ),
-        };
-        if let Some(writer) = writer {
-            writer.join().expect("stdin writer panicked")?;
+        let (sender, exited) = mpsc::channel();
+        let waiter = scope.spawn(move || {
+            let result = sys::wait_for_exit(child);
+            let _ = sender.send(());
+            result
+        });
+        let timed_out = timeout
+            .is_some_and(|timeout| exited.recv_timeout(timeout) == Err(RecvTimeoutError::Timeout));
+        if timed_out {
+            group.kill();
         }
-        Ok(output)
+        let result = waiter
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        result.map(|()| timed_out)
     })
 }
 
@@ -302,8 +262,10 @@ pub struct Cli {
 
 impl Cli {
     pub fn new(argv: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        let argv: Vec<OsString> = argv.into_iter().map(Into::into).collect();
+        assert!(!argv.is_empty(), "argv must name an executable");
         Self {
-            argv: argv.into_iter().map(Into::into).collect(),
+            argv,
             timeout: None,
             attempts: 1,
             retry_delay: Duration::ZERO,
@@ -341,7 +303,12 @@ impl Cli {
         &self.argv[0]
     }
 
-    pub fn run(&self, input: Option<&str>, cwd: Option<&Path>) -> Result<String, ProcessError> {
+    pub fn run(
+        &self,
+        input: Option<&str>,
+        cwd: Option<&Path>,
+        cancellation: &Cancellation,
+    ) -> Result<String, ProcessError> {
         let call = |attempt| Call {
             argv: &self.argv,
             attempt,
@@ -349,17 +316,17 @@ impl Cli {
         };
         for attempt in 1..self.attempts {
             let call = call(attempt);
-            match self.attempt(&call, input, cwd) {
-                Err(error) if error.is_retryable() && !is_cancelled() => {
+            match self.attempt(&call, input, cwd, cancellation) {
+                Err(error) if error.is_retryable() && !cancellation.is_cancelled() => {
                     self.tracer.on_retry(&call, &error, self.retry_delay);
-                    if sleep_unless_cancelled(self.retry_delay) {
+                    if cancellation.sleep(self.retry_delay) {
                         return Err(error);
                     }
                 }
                 result => return result,
             }
         }
-        self.attempt(&call(self.attempts), input, cwd)
+        self.attempt(&call(self.attempts), input, cwd, cancellation)
     }
 
     fn attempt(
@@ -367,16 +334,19 @@ impl Cli {
         call: &Call,
         input: Option<&str>,
         cwd: Option<&Path>,
+        cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
         self.tracer.before_call(call);
-        let result = self.execute(call, input, cwd).and_then(|outcome| {
-            self.tracer.after_call(call, &outcome);
-            if outcome.status.success() {
-                Ok(outcome.stdout)
-            } else {
-                Err(failure(call, &outcome))
-            }
-        });
+        let result = self
+            .execute(call, input, cwd, cancellation)
+            .and_then(|outcome| {
+                self.tracer.after_call(call, &outcome);
+                if outcome.status.success() {
+                    Ok(outcome.stdout)
+                } else {
+                    Err(failure(call, &outcome))
+                }
+            });
         if let Err(error) = &result {
             self.tracer.on_error(call, error);
         }
@@ -388,8 +358,14 @@ impl Cli {
         call: &Call,
         input: Option<&str>,
         cwd: Option<&Path>,
+        cancellation: &Cancellation,
     ) -> Result<Outcome, ProcessError> {
         let start = Instant::now();
+        let name = || call.name().into_owned();
+        let io_error = |source| ProcessError::Io {
+            name: name(),
+            source,
+        };
         let program = which::which(&call.argv[0]).unwrap_or_else(|_| PathBuf::from(&call.argv[0]));
         let mut command = std::process::Command::new(program);
         command
@@ -404,31 +380,47 @@ impl Cli {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        new_group(&mut command);
-        let name = || call.name().into_owned();
-        let child = command.spawn().map_err(|source| ProcessError::Spawn {
+        sys::configure(&mut command);
+        let spawn_error = |source| ProcessError::Spawn {
             name: name(),
             source,
-        })?;
-        let pid = child.id();
-        track(pid);
-        let communicated = communicate(child, input, self.timeout);
-        untrack(pid);
-        match communicated {
-            Ok(Some(output)) => Ok(Outcome {
-                status: output.status,
-                stdout: universal_newlines(&output.stdout),
-                stderr: universal_newlines(&output.stderr),
-                duration: start.elapsed(),
-            }),
-            Ok(None) => Err(ProcessError::Timeout {
+        };
+        let mut child = command.spawn().map_err(spawn_error)?;
+        let group = Arc::new(sys::Group::new(&mut child).map_err(spawn_error)?);
+        let stdout = Capture::start(child.stdout.take().expect("stdout is piped"));
+        let stderr = Capture::start(child.stderr.take().expect("stderr is piped"));
+        let fed = child
+            .stdin
+            .take()
+            .zip(input)
+            .map(|(stdin, input)| feed(stdin, input.to_owned()));
+        let registration = cancellation.register(Arc::clone(&group));
+        let exited = wait_for_exit(&child, &group, self.timeout);
+        // Nothing the child started may outlive it; the group must be killed before the child is reaped.
+        group.kill();
+        drop(registration);
+        let status = child.wait().map_err(io_error)?;
+        let timed_out = exited.map_err(io_error)?;
+        let deadline = Instant::now() + WAIT_DELAY;
+        let stdout = stdout.finish(deadline).map_err(io_error)?;
+        let stderr = stderr.finish(deadline).map_err(io_error)?;
+        if let Some(fed) = fed {
+            settle(&fed, deadline).map_err(io_error)?;
+        }
+        if timed_out {
+            return Err(ProcessError::Timeout {
                 name: name(),
                 timeout: self.timeout.expect("only a timeout stops the wait early"),
-            }),
-            Err(source) => Err(ProcessError::Io {
-                name: name(),
-                source,
-            }),
+            });
         }
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::Cancelled { name: name() });
+        }
+        Ok(Outcome {
+            status,
+            stdout,
+            stderr,
+            duration: start.elapsed(),
+        })
     }
 }
