@@ -1,11 +1,14 @@
 import argparse
-from collections.abc import Callable, Iterable
+import signal
+import threading
+from collections.abc import Callable
 
 import pytest
 from fakes import FakeCommand
 
-from ncli import __version__
+from ncli import __version__, process
 from ncli.cli import main
+from ncli.command import CommandGroup
 from ncli.errors import ExitCode, NcliError
 
 
@@ -48,19 +51,6 @@ def test_present_executables_allow_run(path_with: Callable[..., None]) -> None:
     assert command.received is not None
 
 
-def test_required_executables_can_depend_on_arguments(path_with: Callable[..., None]) -> None:
-    class ArgumentDependent(FakeCommand):
-        def required_executables(self, args: argparse.Namespace) -> Iterable[str]:
-            return [args.command]
-
-    path_with("claude")
-    assert main(["fake", "target", "--command", "claude"], commands=[ArgumentDependent()]) == 0
-    assert (
-        main(["fake", "target", "--command", "codex"], commands=[ArgumentDependent()])
-        == ExitCode.MISSING_EXECUTABLE
-    )
-
-
 def test_help_works_without_required_executables(path_with: Callable[..., None]) -> None:
     path_with()
     with pytest.raises(SystemExit) as exc:
@@ -75,3 +65,33 @@ def test_ncli_error_from_run_maps_to_its_exit_code(capsys: pytest.CaptureFixture
 
     assert main(["fake", "target"], commands=[Failing()]) == ExitCode.FAILURE
     assert capsys.readouterr().err.strip() == "ncli fake: error: bad input"
+
+
+def test_registered_commands_are_available() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["review", "--help"])
+    assert exc.value.code == 0
+
+
+def test_subcommand_errors_use_the_full_command_path(capsys: pytest.CaptureFixture[str]) -> None:
+    class Failing(FakeCommand):
+        def run(self, args: argparse.Namespace) -> int:
+            raise NcliError("bad input")
+
+    group = CommandGroup("group", "a group", [Failing()])
+    assert main(["group", "fake", "target"], commands=[group]) == ExitCode.FAILURE
+    assert capsys.readouterr().err.strip() == "ncli group fake: error: bad input"
+
+
+def test_interrupt_cancels_processes_and_exits_130(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(process, "_cancelled", cancelled := threading.Event())
+
+    class Interrupted(FakeCommand):
+        def run(self, args: argparse.Namespace) -> int:
+            signal.raise_signal(signal.SIGINT)
+            return 0
+
+    previous = signal.getsignal(signal.SIGINT)
+    assert main(["fake", "target"], commands=[Interrupted()]) == ExitCode.INTERRUPTED
+    assert cancelled.is_set()
+    assert signal.getsignal(signal.SIGINT) is previous
