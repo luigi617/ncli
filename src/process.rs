@@ -11,12 +11,9 @@ use windows as sys;
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 pub use cancel::Cancellation;
@@ -24,8 +21,8 @@ pub use cancel::Cancellation;
 use crate::error::Error;
 
 const STDERR_TAIL_LINES: usize = 20;
-// Like Go's exec.Cmd.WaitDelay: after the child exits, a process that escaped its group may still
-// hold the output pipes open, so stop waiting for end-of-file after this long.
+// Like Go's exec.Cmd.WaitDelay: once the child exits, a process that escaped it may still hold the
+// pipes open, so they are closed after this long and the output is reported as incomplete.
 const WAIT_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +35,8 @@ pub enum ProcessError {
     Timeout { name: String, timeout: Duration },
     #[error("{name} was cancelled")]
     Cancelled { name: String },
+    #[error("{name} exited, but a process it started kept its output open")]
+    OutputHeldOpen { name: String },
     #[error("{name} was killed by signal {signal}")]
     Signal { name: String, signal: i32 },
     #[error("{name} exited with code {code}{}", detail(.stderr_tail))]
@@ -177,79 +176,11 @@ fn universal_newlines(bytes: &[u8]) -> String {
         .replace('\r', "\n")
 }
 
-struct Capture {
-    output: Arc<Mutex<Vec<u8>>>,
-    done: mpsc::Receiver<io::Result<()>>,
-}
-
-impl Capture {
-    fn start(mut source: impl Read + Send + 'static) -> Self {
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let (sender, done) = mpsc::channel();
-        let sink = Arc::clone(&output);
-        thread::spawn(move || {
-            let mut chunk = [0; 8192];
-            let result = loop {
-                match source.read(&mut chunk) {
-                    Ok(0) => break Ok(()),
-                    Ok(read) => lock(&sink).extend_from_slice(&chunk[..read]),
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(error) => break Err(error),
-                }
-            };
-            let _ = sender.send(result);
-        });
-        Self { output, done }
-    }
-
-    fn finish(self, deadline: Instant) -> io::Result<String> {
-        settle(&self.done, deadline)?;
-        Ok(universal_newlines(&lock(&self.output)))
-    }
-}
-
-fn feed(mut stdin: ChildStdin, input: String) -> mpsc::Receiver<io::Result<()>> {
-    let (sender, done) = mpsc::channel();
-    thread::spawn(move || {
-        let result = match stdin.write_all(input.as_bytes()) {
-            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-            result => result,
-        };
-        let _ = sender.send(result);
-    });
-    done
-}
-
-fn settle(done: &mpsc::Receiver<io::Result<()>>, deadline: Instant) -> io::Result<()> {
-    match done.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Ok(()),
-        Err(RecvTimeoutError::Disconnected) => panic!("a pipe thread panicked"),
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn wait_for_exit(child: &Child, group: &sys::Group, timeout: Option<Duration>) -> io::Result<bool> {
-    thread::scope(|scope| {
-        let (sender, exited) = mpsc::channel();
-        let waiter = scope.spawn(move || {
-            let result = sys::wait_for_exit(child);
-            let _ = sender.send(());
-            result
-        });
-        let timed_out = timeout
-            .is_some_and(|timeout| exited.recv_timeout(timeout) == Err(RecvTimeoutError::Timeout));
-        if timed_out {
-            group.kill();
-        }
-        let result = waiter
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        result.map(|()| timed_out)
-    })
+struct Communicated {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+    output_closed: bool,
 }
 
 pub struct Cli {
@@ -368,46 +299,22 @@ impl Cli {
         };
         let program = which::which(&call.argv[0]).unwrap_or_else(|_| PathBuf::from(&call.argv[0]));
         let mut command = std::process::Command::new(program);
-        command
-            .args(&call.argv[1..])
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(&call.argv[1..]);
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        sys::configure(&mut command);
-        let spawn_error = |source| ProcessError::Spawn {
-            name: name(),
-            source,
-        };
-        let mut child = command.spawn().map_err(spawn_error)?;
-        let group = Arc::new(sys::Group::new(&mut child).map_err(spawn_error)?);
-        let stdout = Capture::start(child.stdout.take().expect("stdout is piped"));
-        let stderr = Capture::start(child.stderr.take().expect("stderr is piped"));
-        let fed = child
-            .stdin
-            .take()
-            .zip(input)
-            .map(|(stdin, input)| feed(stdin, input.to_owned()));
-        let registration = cancellation.register(Arc::clone(&group));
-        let exited = wait_for_exit(&child, &group, self.timeout);
-        // Nothing the child started may outlive it; the group must be killed before the child is reaped.
-        group.kill();
+        let mut process = sys::Process::spawn(command, input.is_some()).map_err(|source| {
+            ProcessError::Spawn {
+                name: name(),
+                source,
+            }
+        })?;
+        let registration = cancellation.register(process.group());
+        let communicated = process.communicate(input, self.timeout);
         drop(registration);
-        let status = child.wait().map_err(io_error)?;
-        let timed_out = exited.map_err(io_error)?;
-        let deadline = Instant::now() + WAIT_DELAY;
-        let stdout = stdout.finish(deadline).map_err(io_error)?;
-        let stderr = stderr.finish(deadline).map_err(io_error)?;
-        if let Some(fed) = fed {
-            settle(&fed, deadline).map_err(io_error)?;
-        }
-        if timed_out {
+        let status = process.wait().map_err(io_error)?;
+        let communicated = communicated.map_err(io_error)?;
+        if communicated.timed_out {
             return Err(ProcessError::Timeout {
                 name: name(),
                 timeout: self.timeout.expect("only a timeout stops the wait early"),
@@ -416,10 +323,13 @@ impl Cli {
         if cancellation.is_cancelled() {
             return Err(ProcessError::Cancelled { name: name() });
         }
+        if status.success() && !communicated.output_closed {
+            return Err(ProcessError::OutputHeldOpen { name: name() });
+        }
         Ok(Outcome {
             status,
-            stdout,
-            stderr,
+            stdout: universal_newlines(&communicated.stdout),
+            stderr: universal_newlines(&communicated.stderr),
             duration: start.elapsed(),
         })
     }

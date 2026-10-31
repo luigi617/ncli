@@ -6,9 +6,8 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
 use crate::commands::Command;
 use crate::error::Error;
+use crate::interrupt;
 use crate::process::Cancellation;
-
-pub const INTERRUPTED: u8 = 130;
 
 /// Run workflows that chain other CLIs.
 #[derive(Debug, Parser)]
@@ -32,9 +31,11 @@ where
     let matches = Ncli::command().get_matches_from(argv);
     let ncli = Ncli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     let cancellation = Cancellation::global();
-    let result = install_interrupt_handler().and_then(|()| ncli.command.run(cancellation));
+    let result = interrupt::install()
+        .map_err(Error::InterruptHandler)
+        .and_then(|()| ncli.command.run(cancellation));
     if cancellation.is_cancelled() {
-        return ExitCode::from(INTERRUPTED);
+        interrupt::exit();
     }
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -43,17 +44,6 @@ where
             ExitCode::from(error.exit_code())
         }
     }
-}
-
-fn install_interrupt_handler() -> Result<(), Error> {
-    ctrlc::set_handler(|| {
-        let cancellation = Cancellation::global();
-        if cancellation.is_cancelled() {
-            std::process::exit(INTERRUPTED.into());
-        }
-        cancellation.cancel();
-    })?;
-    Ok(())
 }
 
 fn prog(matches: &ArgMatches) -> String {

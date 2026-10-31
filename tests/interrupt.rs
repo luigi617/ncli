@@ -2,13 +2,14 @@
 
 mod common;
 
+use std::io::Read;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use common::script;
-use ncli::cli::INTERRUPTED;
 use tempfile::TempDir;
 
 fn review_with(dir: &Path, reviewer: &str) -> Child {
@@ -37,20 +38,39 @@ fn exit_within(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
 }
 
 fn interrupt(child: &Child) {
-    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    signal(child, libc::SIGINT);
+}
+
+fn signal(child: &Child, signal: libc::c_int) {
+    unsafe { libc::kill(child.id() as libc::pid_t, signal) };
+}
+
+fn signal_kills_reviewers(signal_number: libc::c_int) {
+    let dir = TempDir::new().unwrap();
+    let survived = dir.path().join("survived");
+    let reviewer = format!("#!/bin/sh\nsleep 2\ntouch '{}'\n", survived.display());
+    let mut ncli = review_with(dir.path(), &reviewer);
+    thread::sleep(Duration::from_millis(500));
+    signal(&ncli, signal_number);
+    let status = exit_within(&mut ncli, Duration::from_secs(5));
+    assert_eq!(status.signal(), Some(signal_number), "{status}");
+    thread::sleep(Duration::from_secs(3));
+    assert!(!survived.exists(), "a reviewer outlived ncli");
 }
 
 #[test]
-fn interrupt_kills_reviewers_and_exits_130() {
-    let dir = TempDir::new().unwrap();
-    let mut ncli = review_with(dir.path(), "#!/bin/sh\nsleep 30\n");
-    thread::sleep(Duration::from_millis(500));
-    interrupt(&ncli);
-    let status = exit_within(&mut ncli, Duration::from_secs(5));
-    let output = ncli.wait_with_output().unwrap();
-    assert_eq!(status.code(), Some(INTERRUPTED.into()));
-    assert!(output.stdout.is_empty());
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("ncli review: error"));
+fn sigint_kills_reviewers() {
+    signal_kills_reviewers(libc::SIGINT);
+}
+
+#[test]
+fn sigterm_kills_reviewers() {
+    signal_kills_reviewers(libc::SIGTERM);
+}
+
+#[test]
+fn sighup_kills_reviewers() {
+    signal_kills_reviewers(libc::SIGHUP);
 }
 
 #[test]
@@ -58,7 +78,12 @@ fn second_interrupt_exits_immediately() {
     let dir = TempDir::new().unwrap();
     let huge_answer = "#!/bin/sh\nhead -c 4000000 /dev/zero | tr '\\0' x\n";
     let mut ncli = review_with(dir.path(), huge_answer);
-    thread::sleep(Duration::from_secs(1));
+    let mut first_byte = [0];
+    ncli.stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut first_byte)
+        .unwrap();
     interrupt(&ncli);
     thread::sleep(Duration::from_millis(300));
     assert!(
@@ -67,5 +92,5 @@ fn second_interrupt_exits_immediately() {
     );
     interrupt(&ncli);
     let status = exit_within(&mut ncli, Duration::from_secs(5));
-    assert_eq!(status.code(), Some(INTERRUPTED.into()));
+    assert_eq!(status.signal(), Some(libc::SIGINT), "{status}");
 }

@@ -12,7 +12,7 @@ pub enum Error {
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
     #[error("could not install the interrupt handler: {0}")]
-    InterruptHandler(#[from] ctrlc::Error),
+    InterruptHandler(#[source] io::Error),
     #[error(transparent)]
     Process(#[from] ProcessError),
 }

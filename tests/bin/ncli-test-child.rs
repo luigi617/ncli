@@ -67,14 +67,26 @@ fn main() -> ExitCode {
                 .spawn()
                 .unwrap();
         }
-        ["escape", seconds] => {
+        ["write-until-closed", dir] => {
+            for _ in 0..100 {
+                if writeln!(io::stdout(), "x")
+                    .and_then(|()| io::stdout().flush())
+                    .is_err()
+                {
+                    fs::write(Path::new(dir).join("closed"), "").unwrap();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        ["escape", dir] => {
             let mut grandchild = Command::new(env::current_exe().unwrap());
-            grandchild.args(["sleep", seconds]);
+            grandchild.args(["write-until-closed", dir]);
             #[cfg(unix)]
             std::os::unix::process::CommandExt::process_group(&mut grandchild, 0);
             #[expect(
                 clippy::zombie_processes,
-                reason = "the sleeper must outlive this process"
+                reason = "the grandchild must outlive this process"
             )]
             grandchild.spawn().unwrap();
             print!("done");

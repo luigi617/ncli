@@ -238,14 +238,34 @@ fn processes_left_behind_by_the_child_are_killed() {
     grandchild.assert_killed();
 }
 
+#[cfg(unix)]
 #[test]
-fn escaped_processes_holding_the_output_do_not_block() {
+fn output_held_open_by_an_escaped_process_is_an_error_and_is_closed() {
+    let dir = TempDir::new().unwrap();
     let started = Instant::now();
-    let out = child(&["escape", "10"])
+    let error = child(&["escape", dir.path().to_str().unwrap()])
+        .run(None, None, &Cancellation::default())
+        .unwrap_err();
+    assert!(
+        matches!(error, ProcessError::OutputHeldOpen { .. }),
+        "{error}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        dir.path().join("closed").exists(),
+        "the escaped process can still write to the output pipe"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn nothing_escapes_the_job() {
+    let dir = TempDir::new().unwrap();
+    let out = child(&["escape", dir.path().to_str().unwrap()])
         .run(None, None, &Cancellation::default())
         .unwrap();
-    assert_eq!(out, "done");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(out.contains("done"), "{out}");
 }
 
 fn cancel_after(cancellation: &Cancellation, delay: Duration) {
