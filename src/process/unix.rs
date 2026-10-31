@@ -132,23 +132,23 @@ impl<P: Read + AsRawFd> Output<P> {
         })
     }
 
-    fn drain(&mut self) -> io::Result<()> {
+    // One read per poll keeps a child that writes faster than it is read from starving the deadline.
+    fn read(&mut self) -> io::Result<()> {
         let Some(pipe) = &mut self.pipe else {
             return Ok(());
         };
-        let mut chunk = [0; 8192];
-        loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) => {
-                    self.pipe = None;
-                    return Ok(());
-                }
-                Ok(read) => self.output.extend_from_slice(&chunk[..read]),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-                Err(error) => return Err(error),
-            }
+        let mut chunk = [0; 1 << 16];
+        match pipe.read(&mut chunk) {
+            Ok(0) => self.pipe = None,
+            Ok(read) => self.output.extend_from_slice(&chunk[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => return Err(error),
         }
+        Ok(())
     }
 }
 
@@ -185,6 +185,14 @@ impl<'a> Pipes<'a> {
             if exited && self.stdout.pipe.is_none() && self.stderr.pipe.is_none() {
                 return Ok((timed_out, true));
             }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                if exited {
+                    return Ok((timed_out, false));
+                }
+                group.kill();
+                timed_out = true;
+                deadline = None;
+            }
             let mut fds = Vec::with_capacity(4);
             if !exited {
                 fds.push(watch(exit, libc::POLLIN));
@@ -198,15 +206,7 @@ impl<'a> Pipes<'a> {
             if let Some(pipe) = &self.stdin {
                 fds.push(watch(pipe, libc::POLLOUT));
             }
-            if poll(&mut fds, deadline)? == 0 {
-                if exited {
-                    return Ok((timed_out, false));
-                }
-                group.kill();
-                timed_out = true;
-                deadline = None;
-                continue;
-            }
+            poll(&mut fds, deadline)?;
             let ready = |fd: RawFd| {
                 fds.iter()
                     .any(|polled| polled.fd == fd && polled.revents != 0)
@@ -223,7 +223,7 @@ impl<'a> Pipes<'a> {
                 .as_ref()
                 .is_some_and(|pipe| ready(pipe.as_raw_fd()))
             {
-                self.stdout.drain()?;
+                self.stdout.read()?;
             }
             if self
                 .stderr
@@ -231,7 +231,7 @@ impl<'a> Pipes<'a> {
                 .as_ref()
                 .is_some_and(|pipe| ready(pipe.as_raw_fd()))
             {
-                self.stderr.drain()?;
+                self.stderr.read()?;
             }
             if self
                 .stdin
@@ -280,7 +280,7 @@ fn watch(fd: &impl AsRawFd, events: libc::c_short) -> libc::pollfd {
     }
 }
 
-fn poll(fds: &mut [libc::pollfd], deadline: Option<Instant>) -> io::Result<usize> {
+fn poll(fds: &mut [libc::pollfd], deadline: Option<Instant>) -> io::Result<()> {
     loop {
         let timeout = deadline.map_or(-1, |deadline| {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -288,8 +288,8 @@ fn poll(fds: &mut [libc::pollfd], deadline: Option<Instant>) -> io::Result<usize
                 .unwrap_or(libc::c_int::MAX)
         });
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
-        if let Ok(ready) = usize::try_from(ready) {
-            return Ok(ready);
+        if ready >= 0 {
+            return Ok(());
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
