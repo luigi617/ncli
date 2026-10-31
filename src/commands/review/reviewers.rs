@@ -1,3 +1,7 @@
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use clap::ValueEnum;
@@ -14,24 +18,30 @@ pub enum ReviewerKind {
 
 impl ReviewerKind {
     pub fn reviewer(self) -> Reviewer {
-        let argv: &[&str] = match self {
-            Self::Claude => &[
-                "claude",
-                "--allowedTools",
-                "Bash(gh pr view:*)",
-                "Bash(gh pr diff:*)",
-                "mcp__builder-mcp__CodeReviewReadActions",
-                "--print",
-            ],
-            Self::Codex => &[
-                "codex",
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "--config",
-                "sandbox_workspace_write.network_access=true",
-                "--skip-git-repo-check",
-            ],
+        let (argv, schema_arg): (&[&str], _) = match self {
+            Self::Claude => (
+                &[
+                    "claude",
+                    "--allowedTools",
+                    "Bash(gh pr view:*)",
+                    "Bash(gh pr diff:*)",
+                    "mcp__builder-mcp__CodeReviewReadActions",
+                    "--print",
+                ],
+                SchemaArg::Inline("--json-schema"),
+            ),
+            Self::Codex => (
+                &[
+                    "codex",
+                    "exec",
+                    "--sandbox",
+                    "workspace-write",
+                    "--config",
+                    "sandbox_workspace_write.network_access=true",
+                    "--skip-git-repo-check",
+                ],
+                SchemaArg::File("--output-schema"),
+            ),
         };
         let name = self
             .to_possible_value()
@@ -43,23 +53,66 @@ impl ReviewerKind {
                 .attempts(3)
                 .retry_delay(Duration::from_secs(10))
                 .tracer(StderrTracer),
+            schema_arg,
         }
+    }
+}
+
+pub enum SchemaArg {
+    Inline(&'static str),
+    File(&'static str),
+}
+
+impl SchemaArg {
+    fn args(&self, schema: &str, workdir: &Path) -> io::Result<Vec<OsString>> {
+        Ok(match self {
+            Self::Inline(flag) => vec![flag.into(), schema.into()],
+            Self::File(flag) => {
+                let path = workdir.join("schema.json");
+                fs::write(&path, schema)?;
+                vec![flag.into(), path.into()]
+            }
+        })
     }
 }
 
 pub struct Reviewer {
     pub name: String,
     pub cli: Cli,
+    pub schema_arg: SchemaArg,
 }
 
 impl Reviewer {
     pub fn ask(&self, prompt: &str, cancellation: &Cancellation) -> Result<String, Error> {
+        self.call(prompt, None, cancellation)
+    }
+
+    pub fn ask_structured(
+        &self,
+        prompt: &str,
+        schema: &str,
+        cancellation: &Cancellation,
+    ) -> Result<String, Error> {
+        self.call(prompt, Some(schema), cancellation)
+    }
+
+    fn call(
+        &self,
+        prompt: &str,
+        schema: Option<&str>,
+        cancellation: &Cancellation,
+    ) -> Result<String, Error> {
         let workdir = tempfile::Builder::new()
             .prefix("ncli-review-")
             .tempdir()
             .map_err(Error::WorkingDirectory)?;
+        let args = schema
+            .map(|schema| self.schema_arg.args(schema, workdir.path()))
+            .transpose()
+            .map_err(Error::WorkingDirectory)?
+            .unwrap_or_default();
         Ok(self
             .cli
-            .run(Some(prompt), Some(workdir.path()), cancellation)?)
+            .run(&args, Some(prompt), Some(workdir.path()), cancellation)?)
     }
 }

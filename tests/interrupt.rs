@@ -76,8 +76,17 @@ fn sighup_kills_reviewers() {
 #[test]
 fn second_interrupt_exits_immediately() {
     let dir = TempDir::new().unwrap();
-    let huge_answer = "#!/bin/sh\nhead -c 4000000 /dev/zero | tr '\\0' x\n";
-    let mut ncli = review_with(dir.path(), huge_answer);
+    let huge_verdict = r#"#!/bin/sh
+cat > /dev/null
+case "$*" in
+*-schema*)
+    printf '{"findings": [{"severity": "low", "title": "t", "file": "f", "line": 1, "explanation": "'
+    head -c 4000000 /dev/zero | tr '\0' x
+    printf '", "fix": "x"}]}' ;;
+*) echo answer ;;
+esac
+"#;
+    let mut ncli = review_with(dir.path(), huge_verdict);
     let mut first_byte = [0];
     ncli.stdout
         .as_mut()

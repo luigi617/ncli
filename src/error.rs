@@ -7,8 +7,10 @@ use crate::process::ProcessError;
 pub enum Error {
     #[error("required executables not found on PATH: {}", join_lossy(.0))]
     MissingExecutables(Vec<OsString>),
-    #[error("could not create a working directory: {0}")]
+    #[error("could not prepare a working directory: {0}")]
     WorkingDirectory(#[source] io::Error),
+    #[error("the judge returned an invalid verdict: {0}")]
+    Verdict(#[source] serde_json::Error),
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
     #[error("could not install the interrupt handler: {0}")]
@@ -25,6 +27,7 @@ impl Error {
         match self {
             Self::MissingExecutables(_) => Self::MISSING_EXECUTABLE,
             Self::WorkingDirectory(_)
+            | Self::Verdict(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)
             | Self::Process(_) => Self::FAILURE,

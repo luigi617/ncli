@@ -13,6 +13,11 @@ fn sleep(seconds: &str) {
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (args, schema) = match args[..] {
+        [ref rest @ .., "--schema", schema] => (rest, Some(schema.to_owned())),
+        [ref rest @ .., "--schema-file", path] => (rest, Some(fs::read_to_string(path).unwrap())),
+        ref all => (all, None),
+    };
     match args[..] {
         ["describe", arg] => {
             let mut input = String::new();
@@ -90,6 +95,13 @@ fn main() -> ExitCode {
             )]
             grandchild.spawn().unwrap();
             print!("done");
+        }
+        ["verdict", dir, verdict] => {
+            let mut prompt = String::new();
+            io::stdin().read_to_string(&mut prompt).unwrap();
+            fs::write(Path::new(dir).join("judge.prompt"), prompt).unwrap();
+            fs::write(Path::new(dir).join("judge.schema"), schema.unwrap()).unwrap();
+            print!("{verdict}");
         }
         ["sleep", seconds] => sleep(seconds),
         ["spawn-and-wait", dir] => {

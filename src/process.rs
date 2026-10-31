@@ -236,12 +236,14 @@ impl Cli {
 
     pub fn run(
         &self,
+        args: &[OsString],
         input: Option<&str>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
+        let argv: Vec<OsString> = self.argv.iter().chain(args).cloned().collect();
         let call = |attempt| Call {
-            argv: &self.argv,
+            argv: &argv,
             attempt,
             attempts: self.attempts,
         };

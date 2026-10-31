@@ -30,8 +30,10 @@ pub fn judge(link: &str, debate: &str) -> String {
          \n\
          {debate}\n\
          \n\
-         Verify the disputed points against the change yourself. Produce the final findings that \
-         survive the debate, ranked by severity, each with file, line, and justification. Then list \
-         the findings you rejected and why. Do not modify anything and do not post comments."
+         Verify the disputed points against the change yourself and report only the findings that \
+         survive, as JSON matching the given schema. For each finding, give the file and the most \
+         relevant line, a short title, a one or two sentence explanation of what is wrong and why it \
+         matters, and a one sentence fix. Report no findings if none survive. Do not modify anything \
+         and do not post comments."
     )
 }

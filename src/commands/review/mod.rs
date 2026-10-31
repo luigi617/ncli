@@ -1,5 +1,6 @@
 mod prompts;
 mod reviewers;
+mod verdict;
 
 use std::io::{self, Write};
 use std::sync::mpsc;
@@ -7,7 +8,8 @@ use std::thread;
 
 use clap::{Args, ValueEnum};
 
-pub use reviewers::{Reviewer, ReviewerKind};
+pub use reviewers::{Reviewer, ReviewerKind, SchemaArg};
+pub use verdict::{Finding, Severity, Verdict};
 
 use crate::error::Error;
 use crate::process::{self, Cancellation};
@@ -33,13 +35,8 @@ impl Review {
             .collect();
         process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
         let judge = self.judge.reviewer();
-        debate(
-            &self.link,
-            &reviewers,
-            &judge,
-            cancellation,
-            &mut io::stdout(),
-        )
+        let verdict = debate(&self.link, &reviewers, &judge, cancellation)?;
+        writeln!(io::stdout(), "{verdict}").map_err(Error::Output)
     }
 }
 
@@ -48,11 +45,9 @@ pub fn debate(
     reviewers: &[Reviewer],
     judge: &Reviewer,
     cancellation: &Cancellation,
-    out: &mut impl Write,
-) -> Result<(), Error> {
+) -> Result<Verdict, Error> {
     let reviews = ask_all(reviewers, "review", cancellation, |_| prompts::review(link))?;
     let mut debate = sections("Review", &reviews);
-    emit(out, "", &debate)?;
     let rebuttals = ask_all(reviewers, "rebuttal", cancellation, |name| {
         let own = reviews
             .iter()
@@ -62,22 +57,14 @@ pub fn debate(
         let others = sections("Review", reviews.iter().filter(|(other, _)| *other != name));
         prompts::rebuttal(link, own, &transcript(&others))
     })?;
-    let rebuttals = sections("Rebuttal", &rebuttals);
-    emit(out, "\n", &rebuttals)?;
-    debate.extend(rebuttals);
+    debate.extend(sections("Rebuttal", &rebuttals));
     progress("verdict");
-    let verdict = judge.ask(&prompts::judge(link, &transcript(&debate)), cancellation)?;
-    emit(
-        out,
-        "\n",
-        &[(format!("Verdict: {}", judge.name), verdict.as_str())],
-    )
-}
-
-fn emit(out: &mut impl Write, separator: &str, sections: &[Section]) -> Result<(), Error> {
-    writeln!(out, "{separator}{}", transcript(sections))
-        .and_then(|()| out.flush())
-        .map_err(Error::Output)
+    let verdict = judge.ask_structured(
+        &prompts::judge(link, &transcript(&debate)),
+        verdict::SCHEMA,
+        cancellation,
+    )?;
+    Verdict::parse(&verdict).map_err(Error::Verdict)
 }
 
 fn transcript(sections: &[Section]) -> String {
