@@ -1,0 +1,30 @@
+[package]
+name = "ncli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+default-run = "ncli"
+description = "Define workflows that chain other CLIs into a single command."
+readme = "README.md"
+license = "MIT"
+
+[features]
+test-child = []
+
+[[bin]]
+name = "ncli-test-child"
+path = "tests/bin/ncli-test-child.rs"
+required-features = ["test-child"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+ctrlc = "3.5.2"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+which = "8.0.6"
+
+[dev-dependencies]
+ncli = { path = ".", features = ["test-child"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"

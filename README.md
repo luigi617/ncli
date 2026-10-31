@@ -4,12 +4,12 @@ Define workflows that chain other CLIs: one named command runs an ordered sequen
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/).
+Requires a stable [Rust toolchain](https://rustup.rs/).
 
 ```sh
-uv sync                 # create .venv and install ncli with dev tools
-uv run ncli --version   # run the CLI
-uv run pytest           # run tests
-uv run ruff check .     # lint
-uv run ruff format .    # format
+cargo run -- --version                      # run the CLI
+cargo test                                  # run tests
+cargo clippy --all-targets -- -D warnings   # lint
+cargo fmt                                   # format
+cargo install --path .                      # install ncli
 ```

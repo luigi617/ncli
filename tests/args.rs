@@ -1,0 +1,76 @@
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
+use ncli::cli::Ncli;
+use ncli::commands::Command;
+use ncli::commands::review::{Review, ReviewerKind};
+
+const LINK: &str = "https://example.com/pr/1";
+
+fn review(argv: &[&str]) -> Review {
+    let ncli = Ncli::try_parse_from(["ncli", "review"].iter().chain(argv)).unwrap();
+    let Command::Review(review) = ncli.command;
+    review
+}
+
+fn error_kind(argv: &[&str]) -> ErrorKind {
+    Ncli::try_parse_from(["ncli"].iter().chain(argv))
+        .unwrap_err()
+        .kind()
+}
+
+#[test]
+fn command_definition_is_valid() {
+    Ncli::command().debug_assert();
+}
+
+#[test]
+fn review_takes_the_link_and_defaults_the_judge_to_claude() {
+    let review = review(&[LINK]);
+    assert_eq!(review.link, LINK);
+    assert_eq!(review.judge, ReviewerKind::Claude);
+}
+
+#[test]
+fn judge_accepts_known_reviewers_only() {
+    assert_eq!(
+        review(&[LINK, "--judge", "codex"]).judge,
+        ReviewerKind::Codex
+    );
+    assert_eq!(
+        error_kind(&["review", LINK, "--judge", "gemini"]),
+        ErrorKind::InvalidValue
+    );
+}
+
+#[test]
+fn repeated_flag_keeps_the_last_value() {
+    let review = review(&[LINK, "--judge", "codex", "--judge", "claude"]);
+    assert_eq!(review.judge, ReviewerKind::Claude);
+}
+
+#[test]
+fn unambiguous_flag_prefixes_are_accepted() {
+    assert_eq!(review(&[LINK, "--jud", "codex"]).judge, ReviewerKind::Codex);
+}
+
+#[test]
+fn usage_errors_are_reported() {
+    assert_eq!(
+        error_kind(&[]),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    );
+    assert_eq!(error_kind(&["nope"]), ErrorKind::InvalidSubcommand);
+    assert_eq!(error_kind(&["review"]), ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn review_help_lists_the_judge_default_and_choices() {
+    let help = Ncli::command()
+        .find_subcommand_mut("review")
+        .unwrap()
+        .render_help()
+        .to_string();
+    assert!(help.contains("Reviewer that writes the final verdict"));
+    assert!(help.contains("[default: claude]"));
+    assert!(help.contains("[possible values: claude, codex]"));
+}
