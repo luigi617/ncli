@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::review::{Change, PREFERRED_REMOTE, RemoteBranch};
+use crate::commands::code::review::{Change, RemoteBranch};
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
 
@@ -32,9 +32,12 @@ pub enum Error {
     )]
     NoDefaultBranch,
     #[error(
-        "the repository has several default branches to compare the current branch with ({0}) and none on {PREFERRED_REMOTE}"
+        "the repository has several default branches to compare the current branch with ({branches}) and none on {preferred}"
     )]
-    AmbiguousDefaultBranch(String),
+    AmbiguousDefaultBranch {
+        branches: String,
+        preferred: &'static str,
+    },
     #[error("there is nothing to review in {}: no commits and no uncommitted changes", .0.display())]
     NoCommits(PathBuf),
     #[error(
@@ -56,7 +59,7 @@ pub enum Error {
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files marked assume-unchanged have edits the review would miss ({0}); commit or revert them, or clear the mark with `git update-index --no-assume-unchanged`"
+        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged --no-skip-worktree`"
     )]
     HiddenEdits(String),
     #[error(
@@ -125,7 +128,7 @@ impl Error {
             | Self::Incomplete { .. }
             | Self::ChangeUnavailable(_)
             | Self::NoDefaultBranch
-            | Self::AmbiguousDefaultBranch(_)
+            | Self::AmbiguousDefaultBranch { .. }
             | Self::NoCommits(_)
             | Self::NotAWorkTree(_)
             | Self::NoChanges { .. }

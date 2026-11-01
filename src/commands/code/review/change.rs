@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use crate::process::{self, Cancellation, Cli, ProcessError};
 
-pub const PREFERRED_REMOTE: &str = "origin";
+const PREFERRED_REMOTE: &str = "origin";
 const REMOTES: &str = "refs/remotes/";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ impl fmt::Display for RemoteBranch {
 
 struct Git<'a> {
     cli: Cli,
-    cwd: Option<&'a Path>,
+    cwd: &'a Path,
     cancellation: &'a Cancellation,
 }
 
@@ -53,7 +53,9 @@ impl Git<'_> {
 
     fn run_with_input(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, ProcessError> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-        let output = self.cli.run(&args, input, self.cwd, self.cancellation)?;
+        let output = self
+            .cli
+            .run(&args, input, Some(self.cwd), self.cancellation)?;
         Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
     }
 
@@ -74,8 +76,9 @@ impl Git<'_> {
             .tempdir()
             .map_err(Error::Snapshot)?;
         let index = dir.path().join("index");
-        let real_index = self.run(&["rev-parse", "--git-path", "index"])?;
-        let real_index = self.cwd.unwrap_or(Path::new("")).join(real_index);
+        let real_index = self
+            .cwd
+            .join(self.run(&["rev-parse", "--git-path", "index"])?);
         copy_index(&real_index, &index).map_err(Error::Snapshot)?;
         let git = Git {
             cli: Cli::new(["git"]).env("GIT_INDEX_FILE", &index),
@@ -98,27 +101,34 @@ impl Git<'_> {
         Ok(git.run(&["write-tree"])?)
     }
 
-    // Clears the assume-unchanged bits, so it must only run on a copy of the index.
+    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
+    // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
     fn hidden_edits(&self) -> Result<Vec<String>, ProcessError> {
         let files = self.run(&["ls-files", "-v", "-z"])?;
-        let assumed: Vec<&str> = files
+        let marked: Vec<&str> = files
             .split('\0')
             .filter_map(|entry| entry.split_once(' '))
-            .filter(|(tag, _)| tag.bytes().all(|byte| byte.is_ascii_lowercase()))
+            .filter(|&(tag, path)| match tag {
+                "S" | "s" => self.cwd.join(path).symlink_metadata().is_ok(),
+                tag => tag.bytes().all(|byte| byte.is_ascii_lowercase()),
+            })
             .map(|(_, path)| path)
             .collect();
-        if assumed.is_empty() {
+        if marked.is_empty() {
             return Ok(Vec::new());
         }
-        let paths: String = assumed.iter().map(|path| format!("{path}\0")).collect();
-        self.run_with_input(
-            &["update-index", "--no-assume-unchanged", "-z", "--stdin"],
-            Some(paths.as_bytes()),
-        )?;
+        let paths: String = marked.iter().map(|path| format!("{path}\0")).collect();
+        // With --stdin, update-index applies only one of several flags, so each bit has its own call.
+        for flag in ["--no-assume-unchanged", "--no-skip-worktree"] {
+            self.run_with_input(
+                &["update-index", flag, "-z", "--stdin"],
+                Some(paths.as_bytes()),
+            )?;
+        }
         let modified = self.run(&["diff", "--name-only", "-z"])?;
         Ok(modified
             .split('\0')
-            .filter(|path| assumed.contains(path))
+            .filter(|path| marked.contains(path))
             .map(str::to_owned)
             .collect())
     }
@@ -183,13 +193,14 @@ impl Git<'_> {
                 .position(|branch| branch.0.starts_with(&preferred))
             {
                 Some(index) => Ok(branches.swap_remove(index)),
-                None => Err(Error::AmbiguousDefaultBranch(
-                    branches
+                None => Err(Error::AmbiguousDefaultBranch {
+                    branches: branches
                         .iter()
                         .map(RemoteBranch::to_string)
                         .collect::<Vec<_>>()
                         .join(", "),
-                )),
+                    preferred: PREFERRED_REMOTE,
+                }),
             },
         }
     }
@@ -212,7 +223,7 @@ impl Change {
     pub fn local(cancellation: &Cancellation) -> Result<Self, Error> {
         let git = Git {
             cli: Cli::new(["git"]),
-            cwd: None,
+            cwd: Path::new("."),
             cancellation,
         };
         process::require_executables([git.cli.executable()])?;
@@ -220,10 +231,7 @@ impl Change {
             Err(error @ ProcessError::Exit { .. }) => return Err(Error::NotAWorkTree(error)),
             repo => PathBuf::from(repo?),
         };
-        let git = Git {
-            cwd: Some(&repo),
-            ..git
-        };
+        let git = Git { cwd: &repo, ..git };
         let head = git.head()?;
         let base = match &head {
             Some(head) => head.clone(),
@@ -273,8 +281,9 @@ impl Change {
                 base,
                 snapshot,
             } => format!(
-                "Read it yourself by running `git diff {base} {snapshot}` in {}, and read files with \
-                 `git show {snapshot}:<path>`, not from the working tree, which may have changed since.",
+                "Read it yourself by running `git diff {base} {snapshot}` in the repository at `{}`, \
+                 and read files with `git show {snapshot}:<path>`, not from the working tree, which \
+                 may have changed since.",
                 repo.display()
             ),
             Self::Branch {
@@ -284,8 +293,8 @@ impl Change {
                 ..
             } => format!(
                 "Read it yourself by running `git log {merge_base}..{head}` and `git diff {merge_base} \
-                 {head}` in {}, and read files with `git show {head}:<path>`, not from the working \
-                 tree, which may have changed since.",
+                 {head}` in the repository at `{}`, and read files with `git show {head}:<path>`, not \
+                 from the working tree, which may have changed since.",
                 repo.display()
             ),
         }
@@ -302,7 +311,11 @@ impl fmt::Display for Change {
             Self::Branch {
                 repo, base, head, ..
             } => {
-                write!(f, "the commits from {base} to {head} in {}", repo.display())
+                write!(
+                    f,
+                    "the commits on {head} since it branched from {base} in {}",
+                    repo.display()
+                )
             }
         }
     }

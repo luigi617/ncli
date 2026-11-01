@@ -390,7 +390,7 @@ esac
         );
         let snapshot = snapshot_of_uncommitted_review(&prompt);
         assert!(prompt.contains(&format!(
-            "`git diff {head} {snapshot}` in {}",
+            "`git diff {head} {snapshot}` in the repository at `{}`",
             root.display()
         )));
         fs::write(repo.path().join("new.rs"), "edited later\n").unwrap();
@@ -467,7 +467,9 @@ esac
         let (merge_base, head) = feature_branch(repo.path());
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
-            prompt.contains(&format!("about the commits from origin/main to {head} in ")),
+            prompt.contains(&format!(
+                "about the commits on {head} since it branched from origin/main in "
+            )),
             "{prompt}"
         );
         assert!(prompt.contains(&format!(
@@ -495,14 +497,16 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits from upstream/main to {head} in "
+                "about the commits on {head} since it branched from upstream/main in "
             )),
             "{prompt}"
         );
         set_default_branch(repo.path(), "origin");
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
-            prompt.contains(&format!("about the commits from origin/main to {head} in ")),
+            prompt.contains(&format!(
+                "about the commits on {head} since it branched from origin/main in "
+            )),
             "{prompt}"
         );
     }
@@ -619,7 +623,7 @@ esac
         fs::write(repo.path().join("sub/build.out"), "output\n").unwrap();
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
-            prompt.contains("about the commits from origin/main to "),
+            prompt.contains("since it branched from origin/main in "),
             "{prompt}"
         );
     }
@@ -646,7 +650,9 @@ esac
         git(repo.path(), &["branch", "origin/main", &head]);
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
-            prompt.contains(&format!("about the commits from origin/main to {head} in ")),
+            prompt.contains(&format!(
+                "about the commits on {head} since it branched from origin/main in "
+            )),
             "{prompt}"
         );
         assert!(prompt.contains(&format!("`git log {merge_base}..{head}`")));
@@ -663,8 +669,8 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: files marked assume-unchanged have edits the review \
-                 would miss (README.md)"
+                "ncli code review: error: files marked assume-unchanged or skip-worktree have edits \
+                 the review would miss (README.md)"
             ),
             "{error}"
         );
@@ -672,6 +678,44 @@ esac
             git(repo.path(), &["ls-files", "-v", "README.md"]),
             "h README.md",
             "the real index lost its assume-unchanged mark"
+        );
+    }
+
+    #[test]
+    fn edits_to_skip_worktree_files_are_rejected_but_sparse_files_are_not() {
+        let repo = repo();
+        git(
+            repo.path(),
+            &["update-index", "--skip-worktree", "README.md"],
+        );
+        fs::write(repo.path().join("README.md"), "secret\n").unwrap();
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains("have edits the review would miss (README.md)"),
+            "{error}"
+        );
+        assert_eq!(
+            git(repo.path(), &["ls-files", "-v", "README.md"]),
+            "S README.md"
+        );
+
+        git(
+            repo.path(),
+            &["update-index", "--no-skip-worktree", "README.md"],
+        );
+        git(repo.path(), &["checkout", "--quiet", "--", "README.md"]);
+        let (_, head) = feature_branch(repo.path());
+        git(
+            repo.path(),
+            &["update-index", "--skip-worktree", "README.md"],
+        );
+        fs::remove_file(repo.path().join("README.md")).unwrap();
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains(&format!(
+                "about the commits on {head} since it branched from origin/main in "
+            )),
+            "{prompt}"
         );
     }
 

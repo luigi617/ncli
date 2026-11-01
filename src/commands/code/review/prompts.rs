@@ -40,9 +40,9 @@ pub fn judge(change: &Change, debate: &str) -> String {
          survive, as JSON matching the given schema. Unnecessary changes and code that could be \
          simpler or cleaner are findings too, rated by how much they matter. For each finding, give \
          the file and the most relevant line, a short title, a one or two sentence explanation of \
-         what is wrong and why it matters, and a one sentence fix. Report no findings if none survive. Set change_accessed to \
-         false, with no findings, if you or any reviewer could not access the change. Do not modify \
-         anything and do not post comments.",
+         what is wrong and why it matters, and a one sentence fix. Report no findings if none \
+         survive. Set change_accessed to false, with no findings, if you or any reviewer could not \
+         access the change. Do not modify anything and do not post comments.",
         change.access()
     )
 }

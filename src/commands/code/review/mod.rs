@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-pub use change::{Change, PREFERRED_REMOTE, RemoteBranch};
+pub use change::{Change, RemoteBranch};
 pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
 use super::parse_link;
