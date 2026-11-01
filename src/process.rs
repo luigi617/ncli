@@ -246,6 +246,7 @@ struct Communicated {
 
 pub struct Cli {
     argv: Vec<OsString>,
+    envs: Vec<(OsString, OsString)>,
     timeout: Option<Duration>,
     attempts: u32,
     retry_delay: Duration,
@@ -260,6 +261,7 @@ impl Cli {
         assert!(!argv.is_empty(), "argv must name an executable");
         Self {
             argv,
+            envs: Vec::new(),
             timeout: None,
             attempts: 1,
             retry_delay: Duration::ZERO,
@@ -267,6 +269,11 @@ impl Cli {
             #[cfg(unix)]
             leave_running: false,
         }
+    }
+
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.envs.push((key.into(), value.into()));
+        self
     }
 
     pub fn timeout(self, timeout: Duration) -> Self {
@@ -389,7 +396,9 @@ impl Cli {
         };
         let program = which::which(&call.argv[0]).unwrap_or_else(|_| PathBuf::from(&call.argv[0]));
         let mut command = std::process::Command::new(program);
-        command.args(&call.argv[1..]);
+        command
+            .args(&call.argv[1..])
+            .envs(self.envs.iter().map(|(k, v)| (k, v)));
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }

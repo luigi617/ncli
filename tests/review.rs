@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use common::child;
 use ncli::agent::{Agent, SchemaArg, Session};
 use ncli::commands::Context;
-use ncli::commands::code::review::{SCHEMA, Verdict, debate};
+use ncli::commands::code::review::{Change, SCHEMA, Verdict, debate};
 use ncli::error::Error;
 use ncli::process::Cancellation;
 use tempfile::TempDir;
@@ -72,7 +72,7 @@ fn run_debate(reviewers: &[Agent], judge: &Agent) -> Result<Verdict, Error> {
         prog: "ncli code review",
         cancellation: &Cancellation::default(),
     };
-    debate(LINK, reviewers, judge, &context)
+    debate(&Change::Link(LINK.to_owned()), reviewers, judge, &context)
 }
 
 #[test]
@@ -178,7 +178,10 @@ fn every_call_runs_in_its_own_working_directory() {
 
 #[cfg(unix)]
 mod binary {
-    use std::process::{Output, Stdio};
+    use std::fs;
+    use std::path::Path;
+    use std::process::{Command, Output, Stdio};
+    use std::time::{Duration, SystemTime};
 
     use super::LINK;
     use crate::common::{ncli, script};
@@ -186,9 +189,10 @@ mod binary {
     use tempfile::TempDir;
 
     const FAKE_REVIEWER: &str = r#"#!/bin/sh
-cat > /dev/null
+prompt=$(cat)
 case "$*" in
 *--output-schema*|*--json-schema*)
+    printf '%s' "$prompt" > "$(dirname "$0")/$(basename "$0").verdict-prompt"
     echo '{"change_accessed": true, "findings": [{"severity": "low", "title": "Typo from '"$(basename "$0")"'", "file": "README.md", "line": 1,
         "explanation": "A word is misspelled.", "fix": "Correct the spelling."}]}' ;;
 *) echo "$(basename "$0") answer" ;;
@@ -197,19 +201,25 @@ esac
 
     fn run_ncli(reviewers: &[(&str, &str)], args: &[&str]) -> Output {
         let dir = TempDir::new().unwrap();
+        install_reviewers(dir.path(), reviewers);
+        in_path(dir.path(), args).output().unwrap()
+    }
+
+    fn install_reviewers(dir: &Path, reviewers: &[(&str, &str)]) {
         for (name, body) in reviewers {
-            script(dir.path(), name, body);
+            script(dir, name, body);
         }
-        let path = format!(
-            "{}:{}",
-            dir.path().display(),
-            std::env::var("PATH").unwrap()
-        );
-        ncli(&dir.path().join("state"))
+    }
+
+    fn in_path(dir: &Path, args: &[&str]) -> Command {
+        let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap());
+        let mut command = ncli(&dir.join("state"));
+        command
             .args(args)
             .env("PATH", path)
-            .output()
-            .unwrap()
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        command
     }
 
     fn verdict_of(args: &[&str]) -> String {
@@ -265,5 +275,365 @@ esac
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("ncli code review: error: codex was killed by signal 15"));
         assert!(err.contains("ncli: codex (attempt 1/3) failed: "));
+    }
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(["-c", "user.name=ncli", "-c", "user.email=ncli@example.com"])
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn empty_repo() -> TempDir {
+        let repo = TempDir::new().unwrap();
+        git(
+            repo.path(),
+            &["init", "--quiet", "--initial-branch", "main"],
+        );
+        repo
+    }
+
+    fn repo_with_remote(remote: &str) -> TempDir {
+        let repo = empty_repo();
+        fs::write(repo.path().join("README.md"), "hello\n").unwrap();
+        git(repo.path(), &["add", "README.md"]);
+        git(repo.path(), &["commit", "--quiet", "--message", "Start."]);
+        set_default_branch(repo.path(), remote);
+        repo
+    }
+
+    fn set_default_branch(repo: &Path, remote: &str) {
+        let branch = format!("refs/remotes/{remote}/main");
+        git(repo, &["update-ref", &branch, "refs/heads/main"]);
+        git(
+            repo,
+            &[
+                "symbolic-ref",
+                &format!("refs/remotes/{remote}/HEAD"),
+                &branch,
+            ],
+        );
+    }
+
+    fn repo() -> TempDir {
+        repo_with_remote("origin")
+    }
+
+    fn feature_branch(repo: &Path) -> (String, String) {
+        let merge_base = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["switch", "--quiet", "--create", "feature"]);
+        fs::write(repo.join("README.md"), "hello, world\n").unwrap();
+        git(repo, &["commit", "--quiet", "--all", "--message", "Greet."]);
+        (merge_base, git(repo, &["rev-parse", "HEAD"]))
+    }
+
+    fn snapshot_of_uncommitted_review(prompt: &str) -> &str {
+        let (_, rest) = prompt
+            .split_once("and read files with `git show ")
+            .unwrap_or_else(|| panic!("{prompt}"));
+        rest.split_once(":<path>`").unwrap().0
+    }
+
+    fn review_locally(dir: &Path, repo: &Path) -> Output {
+        in_path(dir, &["code", "review"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+    }
+
+    fn verdict_prompt_of_local_review(repo: &Path) -> String {
+        let dir = TempDir::new().unwrap();
+        install_reviewers(
+            dir.path(),
+            &[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)],
+        );
+        let output = review_locally(dir.path(), repo);
+        assert!(output.status.success(), "{output:?}");
+        fs::read_to_string(dir.path().join("claude.verdict-prompt")).unwrap()
+    }
+
+    fn local_review_error(repo: &Path) -> String {
+        let dir = TempDir::new().unwrap();
+        install_reviewers(
+            dir.path(),
+            &[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)],
+        );
+        let output = review_locally(dir.path(), repo);
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert!(!dir.path().join("claude.verdict-prompt").exists());
+        String::from_utf8(output.stderr).unwrap()
+    }
+
+    #[test]
+    fn without_a_link_a_snapshot_of_the_uncommitted_changes_is_reviewed() {
+        let repo = repo();
+        git(repo.path(), &["config", "status.showUntrackedFiles", "no"]);
+        fs::write(repo.path().join("new.rs"), "fn main() {}\n").unwrap();
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let root = repo.path().canonicalize().unwrap();
+        assert!(
+            prompt.contains(&format!(
+                "about the uncommitted changes in {}. Each reviewer",
+                root.display()
+            )),
+            "{prompt}"
+        );
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert!(prompt.contains(&format!(
+            "`git diff {head} {snapshot}` in {}",
+            root.display()
+        )));
+        fs::write(repo.path().join("new.rs"), "edited later\n").unwrap();
+        assert_eq!(
+            git(repo.path(), &["show", &format!("{snapshot}:new.rs")]),
+            "fn main() {}"
+        );
+    }
+
+    #[test]
+    fn an_edit_with_unchanged_stat_data_is_in_the_snapshot() {
+        let repo = repo();
+        git(repo.path(), &["config", "core.checkStat", "minimal"]);
+        git(repo.path(), &["config", "core.trustctime", "false"]);
+        let readme = repo.path().join("README.md");
+        let past = SystemTime::now() - Duration::from_secs(60);
+        let set_mtime = |path: &Path| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        };
+        set_mtime(&readme);
+        git(repo.path(), &["add", "README.md"]);
+        fs::write(&readme, "jello\n").unwrap();
+        set_mtime(&readme);
+        set_mtime(&repo.path().join(".git/index"));
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert_eq!(
+            git(repo.path(), &["show", &format!("{snapshot}:README.md")]),
+            "jello"
+        );
+    }
+
+    #[test]
+    fn a_review_from_a_subdirectory_snapshots_from_the_real_index() {
+        let repo = repo();
+        fs::write(repo.path().join(".gitignore"), "README.md\n").unwrap();
+        let sub = repo.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let prompt = verdict_prompt_of_local_review(&sub);
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert_eq!(
+            git(repo.path(), &["show", &format!("{snapshot}:README.md")]),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn without_commits_the_uncommitted_changes_are_compared_with_the_empty_tree() {
+        let repo = empty_repo();
+        fs::write(repo.path().join("staged.rs"), "fn main() {}\n").unwrap();
+        git(repo.path(), &["add", "staged.rs"]);
+        let empty_tree = git(repo.path(), &["hash-object", "-t", "tree", "/dev/null"]);
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert!(
+            prompt.contains(&format!("`git diff {empty_tree} {snapshot}`")),
+            "{prompt}"
+        );
+        assert_eq!(
+            git(repo.path(), &["show", &format!("{snapshot}:staged.rs")]),
+            "fn main() {}"
+        );
+        assert!(!git(repo.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn without_a_link_or_uncommitted_changes_the_current_branch_is_reviewed() {
+        let repo = repo();
+        let (merge_base, head) = feature_branch(repo.path());
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains(&format!("about the commits from origin/main to {head} in ")),
+            "{prompt}"
+        );
+        assert!(prompt.contains(&format!(
+            "`git log {merge_base}..{head}` and `git diff {merge_base} {head}`"
+        )));
+    }
+
+    #[test]
+    fn the_default_branch_may_be_on_another_remote() {
+        let repo = repo_with_remote("upstream");
+        let (_, head) = feature_branch(repo.path());
+        set_default_branch(repo.path(), "fork");
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: the repository has several default branches to compare \
+                 the current branch with (fork/main, upstream/main) and none on origin"
+            ),
+            "{error}"
+        );
+        git(
+            repo.path(),
+            &["symbolic-ref", "--delete", "refs/remotes/fork/HEAD"],
+        );
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains(&format!(
+                "about the commits from upstream/main to {head} in "
+            )),
+            "{prompt}"
+        );
+        set_default_branch(repo.path(), "origin");
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains(&format!("about the commits from origin/main to {head} in ")),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_local_review_needs_something_to_review_and_a_branch_to_compare_with() {
+        let repo = repo();
+        let root = repo.path().canonicalize().unwrap();
+        assert!(local_review_error(repo.path()).contains(&format!(
+            "ncli code review: error: there is nothing to review in {}: no uncommitted changes \
+                 and no commits that are not on origin/main",
+            root.display()
+        )));
+        git(
+            repo.path(),
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        assert!(local_review_error(repo.path()).contains(
+            "ncli code review: error: the repository has no default branch to compare the current \
+             branch with; set one with `git remote set-head <remote> --auto`"
+        ));
+        let empty = empty_repo();
+        let root = empty.path().canonicalize().unwrap();
+        assert!(local_review_error(empty.path()).contains(&format!(
+            "ncli code review: error: there is nothing to review in {}: no commits and no \
+             uncommitted changes",
+            root.display()
+        )));
+    }
+
+    #[test]
+    fn a_branch_without_common_history_is_reported() {
+        let repo = repo();
+        git(repo.path(), &["switch", "--quiet", "--orphan", "unrelated"]);
+        fs::write(repo.path().join("other.rs"), "fn main() {}\n").unwrap();
+        git(repo.path(), &["add", "other.rs"]);
+        git(
+            repo.path(),
+            &["commit", "--quiet", "--message", "Unrelated."],
+        );
+        let root = repo.path().canonicalize().unwrap();
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(&format!(
+                "ncli code review: error: the current branch in {} has no history in common with \
+                 origin/main",
+                root.display()
+            )),
+            "{error}"
+        );
+    }
+
+    fn repo_with_submodule() -> (TempDir, TempDir) {
+        let sub = repo();
+        let repo = repo();
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                sub.path().to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(repo.path(), &["commit", "--quiet", "--message", "Add sub."]);
+        (repo, sub)
+    }
+
+    #[test]
+    fn uncommitted_changes_inside_a_submodule_are_rejected() {
+        let (repo, _sub) = repo_with_submodule();
+        fs::write(repo.path().join("sub/README.md"), "changed\n").unwrap();
+        let root = repo.path().canonicalize().unwrap();
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(&format!(
+                "ncli code review: error: the uncommitted changes inside submodules of {} cannot \
+                 be reviewed (sub); commit them in the submodules first",
+                root.display()
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn untracked_files_inside_a_submodule_do_not_block_a_review() {
+        let (repo, _sub) = repo_with_submodule();
+        fs::write(repo.path().join("sub/build.out"), "output\n").unwrap();
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains("about the commits from origin/main to "),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_local_review_outside_a_work_tree_asks_for_a_link() {
+        let outside = TempDir::new().unwrap();
+        let error = local_review_error(outside.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: there are no local changes to review outside a git \
+                 work tree; give a link instead: git exited with code 128: fatal: not a git \
+                 repository"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_local_review_has_nowhere_to_publish_comments() {
+        let repo = repo();
+        fs::write(repo.path().join("README.md"), "changed\n").unwrap();
+        let dir = TempDir::new().unwrap();
+        install_reviewers(
+            dir.path(),
+            &[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)],
+        );
+        assert!(review_locally(dir.path(), repo.path()).status.success());
+        let publish = in_path(dir.path(), &["code", "publish-comment"])
+            .output()
+            .unwrap();
+        assert_eq!(publish.status.code(), Some(Error::FAILURE.into()));
+        let root = repo.path().canonicalize().unwrap();
+        assert_eq!(
+            String::from_utf8(publish.stderr).unwrap().trim(),
+            format!(
+                "ncli code publish-comment: error: the last review was of the uncommitted changes \
+                 in {}, which has nowhere to publish comments",
+                root.display()
+            )
+        );
     }
 }

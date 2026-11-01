@@ -664,23 +664,36 @@ esac
     fn publish_comment_rejects_a_review_without_findings_or_a_corrupt_one() {
         let env = Env::new(&["claude"]);
         let review = env.state.path().join("review.json");
-        for (saved, message) in [
+        let rerun = "; run `ncli code review` again";
+        for (saved, prefix, suffix) in [
+            (
+                format!(
+                    r#"{{"change": {{"link": "{LINK}"}}, "verdict": {{"change_accessed": true, "findings": []}}}}"#
+                ),
+                format!("the last review of the change at {LINK} has no findings to publish"),
+                "",
+            ),
+            (
+                "{".to_owned(),
+                "the saved review is invalid (".to_owned(),
+                rerun,
+            ),
             (
                 format!(
                     r#"{{"link": "{LINK}", "verdict": {{"change_accessed": true, "findings": []}}}}"#
                 ),
-                format!("the last review of {LINK} has no findings to publish"),
+                "the saved review is invalid (missing field `change`".to_owned(),
+                rerun,
             ),
-            ("{".to_owned(), "the saved review is invalid: ".to_owned()),
         ] {
             fs::write(&review, saved).unwrap();
             let output = env.run(&["code", "publish-comment"]);
             assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+            let err = stderr(&output);
             assert!(
-                stderr(&output)
-                    .starts_with(&format!("ncli code publish-comment: error: {message}")),
-                "{}",
-                stderr(&output)
+                err.starts_with(&format!("ncli code publish-comment: error: {prefix}"))
+                    && err.trim_end().ends_with(suffix),
+                "{err}"
             );
         }
         assert!(env.logged("claude.prompt").is_none());

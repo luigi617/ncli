@@ -1,7 +1,7 @@
 use clap::Args;
 
 use super::Guidance;
-use super::review::{Finding, LastReview};
+use super::review::{Change, Finding, LastReview};
 use crate::agent::AgentKind;
 use crate::commands::Context;
 use crate::error::Error;
@@ -15,10 +15,13 @@ pub struct PublishComment {
 
 impl PublishComment {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
-        let LastReview { link, verdict } = LastReview::load()?;
+        let LastReview { change, verdict } = LastReview::load()?;
         if verdict.findings.is_empty() {
-            return Err(Error::NothingToPublish(link));
+            return Err(Error::NothingToPublish(change));
         }
+        let Change::Link(link) = change else {
+            return Err(Error::Unpublishable(change));
+        };
         let agent = AgentKind::first_available()?;
         let count = verdict.findings.len();
         let findings = if count == 1 { "finding" } else { "findings" };
