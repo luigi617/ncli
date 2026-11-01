@@ -9,11 +9,12 @@ use super::Output;
 use crate::error::Error;
 use crate::state::{self, Entry};
 
-/// Print shell code that records the output of every command for `ncli copy`.
+/// Print shell code that records the output of chosen commands for `ncli copy`.
 ///
 /// Add `eval "$(ncli init zsh)"` to ~/.zshrc, or run `ncli init zsh --install` to add it.
-/// Commands named in the ncli_uncaptured array, such as editors and pagers, keep the terminal to
-/// themselves and are not recorded.
+/// Only commands named in the ncli_captured array are recorded, for example `ncli_captured=(gh)`.
+/// A recorded command writes to a pipe instead of the terminal, with stderr merged into stdout,
+/// so do not add interactive programs such as editors and pagers.
 #[derive(Debug, Args)]
 pub struct Init {
     #[arg(value_enum)]

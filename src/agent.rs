@@ -195,12 +195,6 @@ impl Agent {
         let output = self.invoke(args, &prompt, Some(&TASK_SCHEMA), None, cancellation)?;
         let (id, answer) = self.session.read(assigned, output);
         let id = id.ok_or_else(|| Error::NoSession(self.name.clone()))?;
-        let outcome: Outcome =
-            serde_json::from_str(&answer).map_err(|source| Error::InvalidAnswer {
-                agent: self.name.clone(),
-                source,
-                output: answer,
-            })?;
         let resume = self
             .resume
             .iter()
@@ -208,6 +202,13 @@ impl Agent {
             .chain([id.as_str()])
             .collect::<Vec<_>>()
             .join(" ");
+        let outcome: Outcome =
+            serde_json::from_str(&answer).map_err(|source| Error::InvalidOutcome {
+                agent: self.name.clone(),
+                source,
+                output: answer,
+                resume: resume.clone(),
+            })?;
         if !outcome.completed {
             return Err(Error::Incomplete {
                 agent: self.name.clone(),

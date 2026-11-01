@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{env, fmt, fs};
 
@@ -47,8 +47,22 @@ fn dir() -> Result<PathBuf, Error> {
 
 pub fn path(entry: Entry) -> Result<PathBuf, Error> {
     let dir = dir()?;
-    fs::create_dir_all(&dir).map_err(|source| Error::State { entry, source })?;
+    create_private(&dir).map_err(|source| Error::State { entry, source })?;
     Ok(dir.join(entry.file_name()))
+}
+
+#[cfg(unix)]
+fn create_private(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)
 }
 
 pub fn save(entry: Entry, contents: &str) -> Result<(), Error> {

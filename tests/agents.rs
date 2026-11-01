@@ -80,8 +80,12 @@ fn an_answer_that_does_not_match_the_schema_is_an_error() {
     ] {
         let error = perform(&assigned(answer)).unwrap_err();
         assert!(
-            matches!(error, Error::InvalidAnswer { .. }),
+            matches!(error, Error::InvalidOutcome { .. }),
             "{answer}: {error}"
+        );
+        assert!(
+            error.to_string().contains("\nResume: agent resume "),
+            "{error}"
         );
     }
 }
@@ -199,7 +203,7 @@ esac
     #[test]
     fn a_task_runs_on_claude_in_the_current_directory_and_says_how_to_resume() {
         let env = Env::new(&["claude", "codex"]);
-        let output = env.succeed(&["fix", "the bug"]);
+        let output = env.succeed(&["fix the bug"]);
         let args = env.logged("claude.args").unwrap();
         assert_eq!(
             output,
@@ -259,6 +263,27 @@ esac
     }
 
     #[test]
+    fn a_task_must_be_one_quoted_argument_of_several_words() {
+        let env = Env::new(&["claude"]);
+        for (args, word) in [
+            (&["help"][..], "help"),
+            (&["inti", "zsh"], "inti zsh"),
+            (&["review", LINK], &format!("review {LINK}")),
+            (&["fix", "the bug"], "fix the bug"),
+        ] {
+            let output = env.run(args);
+            assert_eq!(output.status.code(), Some(Error::USAGE.into()), "{args:?}");
+            assert!(
+                stderr(&output)
+                    .starts_with(&format!("ncli: error: unrecognized command `{word}`;")),
+                "{}",
+                stderr(&output)
+            );
+        }
+        assert!(env.logged("claude.prompt").is_none());
+    }
+
+    #[test]
     fn an_empty_task_is_a_usage_error() {
         let output = Env::new(&["claude"]).run(&[" "]);
         assert_eq!(output.status.code(), Some(Error::USAGE.into()));
@@ -269,9 +294,14 @@ esac
     fn address_comment_changes_the_current_directory_without_committing() {
         let env = Env::new(&["claude", "codex"]);
         let link = format!("{LINK}#discussion_r1");
+        let output = env.succeed(&["code", "address-comment", &link]);
+        let args = env.logged("claude.args").unwrap();
         assert_eq!(
-            env.succeed(&["code", "address-comment", &link]),
-            "claude did it\n"
+            output,
+            format!(
+                "claude did it\n\nResume: claude --resume {}\n",
+                session_id(&args)
+            )
         );
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(&link));
@@ -295,9 +325,9 @@ esac
         assert!(env.logged("claude.prompt").is_none());
 
         let review = env.succeed(&["code", "review", LINK]);
-        assert_eq!(
-            env.succeed(&["code", "address-comment", "--context", "skip README.md"]),
-            "claude did it\n"
+        assert!(
+            env.succeed(&["code", "address-comment", "--context", "skip README.md"])
+                .starts_with("claude did it\n\nResume: claude --resume ")
         );
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(&format!("<output>\n{}</output>", review)));
@@ -329,9 +359,9 @@ esac
         );
 
         env.succeed(&["code", "review", LINK]);
-        assert_eq!(
-            env.succeed(&["code", "publish-comment", "--context", "only the typos"]),
-            "claude did it\n"
+        assert!(
+            env.succeed(&["code", "publish-comment", "--context", "only the typos"])
+                .starts_with("claude did it\n\nResume: claude --resume ")
         );
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(LINK));
@@ -391,18 +421,19 @@ esac
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn copy_puts_the_output_of_any_command_recorded_by_the_zsh_hook_on_the_clipboard() {
+    fn copy_puts_the_output_of_a_command_recorded_by_the_zsh_hook_on_the_clipboard() {
         use std::io::Write;
         use std::process::Stdio;
         use std::thread;
         use std::time::Duration;
 
         let env = Env::new(&["claude", "pbcopy"]);
-        let init = env.succeed(&["init", "zsh"]);
         let ncli = env!("CARGO_BIN_EXE_ncli");
         let lines = [
-            init,
-            "echo hello; printf '\\033[31mred\\033[0m\\n' >&2".to_owned(),
+            format!(r#"eval "$({ncli} init zsh)""#),
+            "ncli_captured=(echo)".to_owned(),
+            "FOO=1 echo hello; printf '\\033[31mred\\033[0m\\n' >&2".to_owned(),
+            "printf 'not recorded\\n'".to_owned(),
             format!("{ncli} copy"),
             r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/first""#.to_owned(),
             format!("{ncli} 'fix the bug'"),
@@ -430,6 +461,11 @@ esac
         }
         assert!(zsh.wait().unwrap().success());
         assert_eq!(env.logged("first").unwrap(), "hello\nred\n");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&env.state.path().join("terminal.txt")), 0o600);
+        }
         assert!(
             env.logged("clipboard")
                 .unwrap()

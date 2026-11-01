@@ -21,7 +21,7 @@ impl PublishComment {
         }
         let agent = AgentKind::first_available()?;
         let task = self.guidance.apply(prompt(&link, &verdict.findings));
-        Ok(agent.perform(&task, context.cancellation)?.report)
+        Ok(agent.perform(&task, context.cancellation)?.to_string())
     }
 }
 

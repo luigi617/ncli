@@ -29,7 +29,7 @@ impl AddressComment {
         );
         Ok(agent
             .perform(&self.guidance.apply(task), context.cancellation)?
-            .report)
+            .to_string())
     }
 }
 

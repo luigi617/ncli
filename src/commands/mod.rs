@@ -43,7 +43,7 @@ impl Command {
             Self::Code(command) => command.run(context).map(Some),
             Self::Copy => copy::run(context).map(|()| None),
             Self::Init(init) => init.run().map(Some),
-            Self::Task(words) => task::run(&words.join(" "), context).map(|text| Some(text.into())),
+            Self::Task(words) => task::run(words, context).map(|text| Some(text.into())),
         }
     }
 }

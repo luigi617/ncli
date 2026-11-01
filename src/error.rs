@@ -18,6 +18,16 @@ pub enum Error {
         source: serde_json::Error,
         output: String,
     },
+    #[error(
+        "{agent} returned an invalid answer ({source}): {}\nResume: {resume}",
+        last_lines(.output)
+    )]
+    InvalidOutcome {
+        agent: String,
+        source: serde_json::Error,
+        output: String,
+        resume: String,
+    },
     #[error("{0} did not report its session")]
     NoSession(String),
     #[error("{agent} could not finish the task: {}\nResume: {resume}", .report.trim())]
@@ -30,6 +40,10 @@ pub enum Error {
     ChangeUnavailable(String),
     #[error("the task is empty")]
     EmptyTask,
+    #[error(
+        "unrecognized command `{0}`; quote a task to give it to an agent, for example: ncli \"fix the failing test\""
+    )]
+    NotATask(String),
     #[error("there is no last output")]
     NoOutput,
     #[error("there is no review to publish; run `ncli code review` first")]
@@ -66,9 +80,10 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,
-            Self::EmptyTask => Self::USAGE,
+            Self::EmptyTask | Self::NotATask(_) => Self::USAGE,
             Self::WorkingDirectory(_)
             | Self::InvalidAnswer { .. }
+            | Self::InvalidOutcome { .. }
             | Self::NoSession(_)
             | Self::Incomplete { .. }
             | Self::ChangeUnavailable(_)

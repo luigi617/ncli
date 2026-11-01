@@ -18,8 +18,8 @@ use crate::stderr;
     infer_long_args = true,
     args_override_self = true,
     disable_help_subcommand = true,
-    after_help = "Any other command is a task for the first installed of claude and codex, \
-                  for example: ncli \"fix the failing test\""
+    after_help = "A quoted task of several words is given to the first installed of claude and \
+                  codex, for example: ncli \"fix the failing test\""
 )]
 pub struct Ncli {
     #[command(subcommand)]

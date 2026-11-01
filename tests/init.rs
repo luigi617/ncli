@@ -26,3 +26,28 @@ fn install_adds_the_hook_to_the_zsh_startup_file_once() {
         "export EDITOR=vim\neval \"$(ncli init zsh)\"\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_new_state_directory_is_private_and_an_existing_one_is_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let mode = |path: &std::path::Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let init = |state: &std::path::Path| {
+        assert!(
+            ncli(state)
+                .args(["init", "zsh"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    let new = dir.path().join("new");
+    init(&new);
+    assert_eq!(mode(&new), 0o700);
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    init(dir.path());
+    assert_eq!(mode(dir.path()), 0o755);
+}
