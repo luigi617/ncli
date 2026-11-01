@@ -498,6 +498,23 @@ esac
     }
 
     #[test]
+    fn an_agent_that_switches_branches_at_the_same_commit_fails_the_run() {
+        for (moves, to) in [
+            ("git branch other && git switch -q other", " to other at "),
+            ("git checkout -q --detach", " to a detached HEAD at "),
+        ] {
+            let env = Env::repo();
+            let implement = format!("{moves} && echo 'fn f() {{}}' > feature.rs");
+            let stderr = env.fail(&[], &[("FAKE_IMPLEMENT", &implement)]);
+            assert!(
+                stderr.contains(" moved from main at ") && stderr.contains(to),
+                "{stderr}"
+            );
+            assert!(env.logged("reviewed").is_none());
+        }
+    }
+
+    #[test]
     fn the_run_is_checked_before_the_agent_starts() {
         let env = Env::with(&["claude"]);
         env.git(&["init", "--quiet"]);

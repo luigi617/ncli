@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::review::{Change, RemoteBranch};
+use crate::commands::code::review::{Change, Head, RemoteBranch};
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
 
@@ -79,16 +79,10 @@ pub enum Error {
         report: String,
     },
     #[error(
-        "HEAD in {} moved from {} to {} during the run; agents must not commit or switch branches, so the changes were not reviewed",
-        .repo.display(),
-        .from.as_deref().unwrap_or("no commit"),
-        .to.as_deref().unwrap_or("no commit")
+        "HEAD in {} moved from {from} to {to} during the run; agents must not commit or switch branches, so the changes were not reviewed",
+        .repo.display()
     )]
-    HeadMoved {
-        repo: PathBuf,
-        from: Option<String>,
-        to: Option<String>,
-    },
+    HeadMoved { repo: PathBuf, from: Head, to: Head },
     #[error(
         "the review still has findings after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
     )]

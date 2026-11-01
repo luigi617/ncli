@@ -91,11 +91,15 @@ impl Git<'_> {
         Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
     }
 
-    fn head(&self) -> Result<Option<String>, ProcessError> {
-        match self.run(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) {
+    fn head(&self) -> Result<Head, ProcessError> {
+        let optional = |args: &[&str]| match self.run(args) {
             Err(ProcessError::Exit { code: 1, .. }) => Ok(None),
-            head => head.map(Some),
-        }
+            found => found.map(Some),
+        };
+        Ok(Head {
+            branch: optional(&["symbolic-ref", "--quiet", "HEAD"])?,
+            commit: optional(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?,
+        })
     }
 
     fn empty_tree(&self) -> Result<String, ProcessError> {
@@ -296,9 +300,30 @@ fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
         .set_modified(modified)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Head {
+    branch: Option<String>,
+    commit: Option<String>,
+}
+
+impl fmt::Display for Head {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let branch = self
+            .branch
+            .as_deref()
+            .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch));
+        match (branch, &self.commit) {
+            (Some(branch), Some(commit)) => write!(f, "{branch} at {commit}"),
+            (Some(branch), None) => write!(f, "{branch} with no commits"),
+            (None, Some(commit)) => write!(f, "a detached HEAD at {commit}"),
+            (None, None) => f.write_str("no commit"),
+        }
+    }
+}
+
 pub struct Worktree {
     pub repo: PathBuf,
-    pub head: Option<String>,
+    pub head: Head,
     base: Base,
     pub tree: String,
     index: Index,
@@ -335,11 +360,11 @@ impl Worktree {
         };
         let git = Git { cwd: &repo, ..git };
         let head = git.head()?;
-        let committed = match &head {
+        let committed = match &head.commit {
             Some(head) => head.clone(),
             None => git.empty_tree()?,
         };
-        let base = match (earlier, &head) {
+        let base = match (earlier, &head.commit) {
             (Some(earlier), _) => Base::Tree(earlier.tree.clone()),
             (None, Some(head)) => Base::Commit(head.clone()),
             (None, None) => Base::Tree(committed.clone()),
@@ -387,7 +412,7 @@ impl Change {
                 snapshot: tree,
             });
         }
-        let Some(head) = head else {
+        let Some(head) = head.commit else {
             return Err(Error::NoCommits(repo));
         };
         let base = git.default_branch()?;
