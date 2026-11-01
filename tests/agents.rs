@@ -157,6 +157,8 @@ name=$(basename "$0")
 prompt=$(cat)
 case "$prompt" in
 *"judging a code review"*)
+    [ -n "$FAKE_BAD_VERDICT" ] && { echo 'not a verdict'; exit 0; }
+    [ -n "$FAKE_BLOCK_REVIEW" ] && mkdir "$NCLI_STATE_DIR/review.json"
     echo '{"change_accessed": true, "findings": [{"severity": "low", "title": "Typo", "file": "README.md", "line": 1,
         "explanation": "A word is misspelled.", "fix": "Correct the spelling."}]}' ;;
 *"When you are done"*)
@@ -417,8 +419,11 @@ esac
     #[test]
     fn a_state_error_after_a_finished_review_keeps_the_result_for_copy() {
         let env = Env::new(&["claude", "codex"]);
-        fs::create_dir(env.state.path().join("review.json")).unwrap();
-        let output = env.run(&["code", "review", LINK]);
+        let output = env
+            .ncli(&["code", "review", LINK])
+            .env("FAKE_BLOCK_REVIEW", "1")
+            .output()
+            .unwrap();
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert!(stderr(&output).contains("could not access the saved review"));
         let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
@@ -442,6 +447,71 @@ esac
         assert!(!env.state.path().join("review.json").exists());
         let publish = env.run(&["code", "publish-comment"]);
         assert!(stderr(&publish).contains("there is no review to publish"));
+    }
+
+    #[test]
+    fn a_failed_review_leaves_no_older_review_to_publish() {
+        let env = Env::new(&["claude", "codex"]);
+        env.succeed(&["code", "review", LINK]);
+        let failed = env
+            .ncli(&["code", "review", "https://github.com/owner/repo/pull/2"])
+            .env("FAKE_BAD_VERDICT", "1")
+            .output()
+            .unwrap();
+        assert_eq!(failed.status.code(), Some(Error::FAILURE.into()));
+        let publish = env.run(&["code", "publish-comment"]);
+        assert!(stderr(&publish).contains("there is no review to publish"));
+    }
+
+    #[test]
+    fn address_comment_after_publishing_addresses_the_review_not_the_publish_report() {
+        let env = Env::new(&["claude", "codex"]);
+        let review = env.succeed(&["code", "review", LINK]);
+        let publish = env.run(&["code", "publish-comment"]);
+        assert!(publish.status.success());
+        assert!(
+            stderr(&publish).contains(&format!(
+                "ncli code publish-comment: publishing 1 finding to {LINK}..."
+            )),
+            "{}",
+            stderr(&publish)
+        );
+        env.succeed(&["code", "address-comment"]);
+        let prompt = env.logged("claude.prompt").unwrap();
+        assert!(
+            prompt.contains(&format!("<output>\n{review}</output>")),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_run_without_a_session_to_resume_is_still_the_last_outcome() {
+        use std::process::Stdio;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let env = Env::new(&["claude", "codex"]);
+        env.succeed(&["code", "review", LINK]);
+        let publish = env
+            .ncli(&["code", "publish-comment"])
+            .env("FAKE_HANG", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while env.logged("claude.started").is_none() {
+            assert!(Instant::now() < deadline, "claude never started");
+            thread::sleep(Duration::from_millis(20));
+        }
+        unsafe { libc::kill(publish.id() as libc::pid_t, libc::SIGINT) };
+        let output = publish.wait_with_output().unwrap();
+        assert!(!stderr(&output).contains("error:"), "{}", stderr(&output));
+        let saved = fs::read_to_string(env.state.path().join("failure.txt")).unwrap();
+        assert_eq!(
+            saved,
+            "ncli code publish-comment: error: claude was cancelled"
+        );
     }
 
     #[test]

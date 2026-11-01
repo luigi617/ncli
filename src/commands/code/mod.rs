@@ -23,7 +23,10 @@ impl CodeCommand {
     pub fn run(&self, context: &Context) -> Result<Output, Error> {
         match self {
             Self::Review(review) => review.run(context),
-            Self::PublishComment(publish) => publish.run(context).map(Output::from),
+            Self::PublishComment(publish) => publish.run(context).map(|text| Output {
+                text,
+                records: Vec::new(),
+            }),
             Self::AddressComment(address) => address.run(context).map(Output::from),
         }
     }

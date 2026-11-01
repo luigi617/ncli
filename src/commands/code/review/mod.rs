@@ -16,7 +16,6 @@ use crate::commands::{Context, Output};
 use crate::error::Error;
 use crate::process::{self, Cancellation};
 use crate::state::{self, Entry};
-use crate::stderr;
 
 type Answers<'a> = Vec<(&'a str, String)>;
 type Section<'a> = (String, &'a str);
@@ -40,6 +39,7 @@ impl Review {
             .collect();
         process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
         let judge = reviewer(self.judge);
+        state::remove(Entry::Review)?;
         let verdict = debate(&self.link, &reviewers, &judge, context)?;
         let text = Report {
             prog: context.prog,
@@ -113,7 +113,7 @@ pub fn debate(
         prompts::rebuttal(link, own, &transcript(&others))
     })?;
     debate.extend(sections("Rebuttal", &rebuttals));
-    progress(context, "verdict");
+    context.progress("verdict");
     let verdict = ask(
         judge,
         &prompts::judge(link, &transcript(&debate)),
@@ -149,17 +149,13 @@ fn sections<'a>(
         .collect()
 }
 
-fn progress(context: &Context, stage: &str) {
-    stderr::line(format_args!("{}: {stage}...", context.prog));
-}
-
 fn ask_all<'a>(
     reviewers: &'a [Agent],
     stage: &str,
     context: &Context,
     prompt_for: impl Fn(&str) -> String + Sync,
 ) -> Result<Answers<'a>, Error> {
-    progress(context, stage);
+    context.progress(stage);
     let stage_cancellation = context.cancellation.child();
     thread::scope(|scope| {
         let (sender, answered) = mpsc::channel();

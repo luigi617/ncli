@@ -7,10 +7,17 @@ use clap::Subcommand;
 use crate::error::Error;
 use crate::process::Cancellation;
 use crate::state::Entry;
+use crate::stderr;
 
 pub struct Context<'a> {
     pub prog: &'a str,
     pub cancellation: &'a Cancellation,
+}
+
+impl Context<'_> {
+    pub fn progress(&self, stage: &str) {
+        stderr::line(format_args!("{}: {stage}...", self.prog));
+    }
 }
 
 pub struct Output {
