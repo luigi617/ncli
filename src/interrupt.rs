@@ -11,7 +11,7 @@ mod unix {
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::thread;
 
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
     use signal_hook::iterator::Signals;
     use signal_hook::low_level::emulate_default_handler;
 
@@ -21,7 +21,7 @@ mod unix {
 
     // A signal the parent ignores (nohup, background jobs) stays ignored, as in any shell tool.
     pub fn install() -> io::Result<()> {
-        let watched = [SIGINT, SIGTERM, SIGHUP]
+        let watched = [SIGINT, SIGTERM, SIGHUP, SIGQUIT]
             .into_iter()
             .filter(|&signal| !ignored(signal));
         let mut signals = Signals::new(watched)?;

@@ -121,6 +121,11 @@ fn sighup_kills_reviewers() {
 }
 
 #[test]
+fn sigquit_kills_reviewers() {
+    signal_kills_reviewers(libc::SIGQUIT);
+}
+
+#[test]
 fn second_interrupt_exits_immediately() {
     let dir = TempDir::new().unwrap();
     let huge_verdict = r#"#!/bin/sh
