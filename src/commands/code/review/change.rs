@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -70,7 +71,7 @@ impl Git<'_> {
         self.run_with_input(&["hash-object", "-w", "-t", "tree", "--stdin"], Some(b""))
     }
 
-    fn snapshot(&self) -> Result<String, Error> {
+    fn snapshot(&self, base: &str) -> Result<String, Error> {
         let dir = tempfile::Builder::new()
             .prefix("ncli-snapshot-")
             .tempdir()
@@ -92,8 +93,24 @@ impl Git<'_> {
         if !nested.is_empty() {
             return Err(Error::NestedRepositories(nested.join(", ")));
         }
+        let staged = git.changed_paths(&["--cached", base])?;
         git.run(&["add", "--all"])?;
-        Ok(git.run(&["write-tree"])?)
+        let snapshot = git.run(&["write-tree"])?;
+        let kept = git.changed_paths(&[base, &snapshot])?;
+        let kept: HashSet<&str> = kept.split('\0').collect();
+        let undone: Vec<&str> = staged
+            .split('\0')
+            .filter(|path| !path.is_empty() && !kept.contains(path))
+            .collect();
+        if !undone.is_empty() {
+            return Err(Error::UndoneStagedChanges(undone.join(", ")));
+        }
+        Ok(snapshot)
+    }
+
+    fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {
+        let args = [&["diff", "--no-renames", "--name-only", "-z"][..], diff].concat();
+        self.run(&args)
     }
 
     // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
@@ -170,25 +187,22 @@ impl Git<'_> {
 
     fn default_branch(&self) -> Result<RemoteBranch, Error> {
         let output = self.run(&["for-each-ref", "--format=%(refname) %(symref)", REMOTES])?;
-        let mut branches: Vec<RemoteBranch> = output
+        let mut heads: Vec<(&str, RemoteBranch)> = output
             .lines()
             .filter_map(|line| line.split_once(' '))
             .filter(|(name, target)| name.ends_with("/HEAD") && !target.is_empty())
-            .map(|(_, target)| RemoteBranch(target.to_owned()))
+            .map(|(name, target)| (name, RemoteBranch(target.to_owned())))
             .collect();
-        let preferred = format!("{REMOTES}{PREFERRED_REMOTE}/");
-        match branches.len() {
+        let preferred = format!("{REMOTES}{PREFERRED_REMOTE}/HEAD");
+        match heads.len() {
             0 => Err(Error::NoDefaultBranch),
-            1 => Ok(branches.remove(0)),
-            _ => match branches
-                .iter()
-                .position(|branch| branch.0.starts_with(&preferred))
-            {
-                Some(index) => Ok(branches.swap_remove(index)),
+            1 => Ok(heads.remove(0).1),
+            _ => match heads.iter().position(|(name, _)| *name == preferred) {
+                Some(index) => Ok(heads.swap_remove(index).1),
                 None => Err(Error::AmbiguousDefaultBranch {
-                    branches: branches
+                    branches: heads
                         .iter()
-                        .map(RemoteBranch::to_string)
+                        .map(|(_, branch)| branch.to_string())
                         .collect::<Vec<_>>()
                         .join(", "),
                     preferred: PREFERRED_REMOTE,
@@ -236,7 +250,7 @@ impl Change {
                 submodules: submodules.join(", "),
             });
         }
-        let snapshot = git.snapshot()?;
+        let snapshot = git.snapshot(&base)?;
         if snapshot != git.run(&["rev-parse", &format!("{base}^{{tree}}")])? {
             return Ok(Self::Uncommitted {
                 repo,
@@ -305,7 +319,7 @@ impl fmt::Display for Change {
             } => {
                 write!(
                     f,
-                    "the commits on {head} since it branched from {base} in {}",
+                    "the commits up to {head} since it branched from {base} in {}",
                     repo.display()
                 )
             }

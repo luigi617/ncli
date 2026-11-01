@@ -468,7 +468,7 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits on {head} since it branched from origin/main in "
+                "about the commits up to {head} since it branched from origin/main in "
             )),
             "{prompt}"
         );
@@ -497,7 +497,7 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits on {head} since it branched from upstream/main in "
+                "about the commits up to {head} since it branched from upstream/main in "
             )),
             "{prompt}"
         );
@@ -505,7 +505,7 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits on {head} since it branched from origin/main in "
+                "about the commits up to {head} since it branched from origin/main in "
             )),
             "{prompt}"
         );
@@ -651,7 +651,7 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits on {head} since it branched from origin/main in "
+                "about the commits up to {head} since it branched from origin/main in "
             )),
             "{prompt}"
         );
@@ -715,9 +715,58 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits on {head} since it branched from origin/main in "
+                "about the commits up to {head} since it branched from origin/main in "
             )),
             "{prompt}"
+        );
+    }
+
+    #[test]
+    fn staged_changes_the_working_tree_undoes_are_rejected() {
+        let repo = repo();
+        fs::write(repo.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+        git(repo.path(), &["add", "kept.rs"]);
+        git(repo.path(), &["commit", "--quiet", "--message", "Keep."]);
+        git(repo.path(), &["rm", "--quiet", "--cached", "README.md"]);
+        fs::write(repo.path().join("kept.rs"), "fn staged() {}\n").unwrap();
+        git(repo.path(), &["add", "kept.rs"]);
+        fs::write(repo.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: the working tree undoes staged changes the review would \
+                 miss (README.md, kept.rs); commit them, or make the working tree match the index"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_staged_change_edited_again_is_reviewed_as_it_is_on_disk() {
+        let repo = repo();
+        fs::write(repo.path().join("README.md"), "staged\n").unwrap();
+        git(repo.path(), &["add", "README.md"]);
+        fs::write(repo.path().join("README.md"), "on disk\n").unwrap();
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert_eq!(
+            git(repo.path(), &["show", &format!("{snapshot}:README.md")]),
+            "on disk"
+        );
+    }
+
+    #[test]
+    fn only_the_origin_remote_itself_is_preferred() {
+        let repo = repo_with_remote("origin/team");
+        feature_branch(repo.path());
+        set_default_branch(repo.path(), "upstream");
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: the repository has several default branches to compare \
+                 the current branch with (origin/team/main, upstream/main) and none on origin"
+            ),
+            "{error}"
         );
     }
 
@@ -750,7 +799,7 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         assert!(
             prompt.contains(&format!(
-                "about the commits on {head} since it branched from team/upstream/main in "
+                "about the commits up to {head} since it branched from team/upstream/main in "
             )),
             "{prompt}"
         );

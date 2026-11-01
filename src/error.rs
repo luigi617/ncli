@@ -66,6 +66,10 @@ pub enum Error {
         "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
     )]
     NestedRepositories(String),
+    #[error(
+        "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
+    )]
+    UndoneStagedChanges(String),
     #[error("the task is empty")]
     EmptyTask,
     #[error(
@@ -136,6 +140,7 @@ impl Error {
             | Self::DirtySubmodules { .. }
             | Self::HiddenEdits(_)
             | Self::NestedRepositories(_)
+            | Self::UndoneStagedChanges(_)
             | Self::NoOutput
             | Self::NoReview
             | Self::NothingToPublish(_)
