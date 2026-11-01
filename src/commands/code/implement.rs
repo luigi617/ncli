@@ -74,8 +74,8 @@ fn settled(
     let error = if worktree.head != baseline.head {
         Error::HeadMoved {
             repo: worktree.repo,
-            from: baseline.head.clone(),
-            to: worktree.head,
+            from: Box::new(baseline.head.clone()),
+            to: Box::new(worktree.head),
         }
     } else if worktree.tree == baseline.tree {
         Error::NothingImplemented {

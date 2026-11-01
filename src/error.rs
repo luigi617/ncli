@@ -82,7 +82,11 @@ pub enum Error {
         "HEAD in {} moved from {from} to {to} during the run; agents must not commit or switch branches, so the changes were not reviewed",
         .repo.display()
     )]
-    HeadMoved { repo: PathBuf, from: Head, to: Head },
+    HeadMoved {
+        repo: PathBuf,
+        from: Box<Head>,
+        to: Box<Head>,
+    },
     #[error(
         "the review still has findings after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
     )]
