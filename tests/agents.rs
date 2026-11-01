@@ -415,6 +415,21 @@ esac
     }
 
     #[test]
+    fn a_state_error_after_a_finished_review_keeps_the_result_for_copy() {
+        let env = Env::new(&["claude", "codex"]);
+        fs::create_dir(env.state.path().join("review.json")).unwrap();
+        let output = env.run(&["code", "review", LINK]);
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert!(stderr(&output).contains("could not access the saved review"));
+        let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
+        assert!(
+            saved.starts_with("## ncli code review: 1 finding"),
+            "{saved}"
+        );
+        assert!(!env.state.path().join("failure.txt").exists());
+    }
+
+    #[test]
     fn an_empty_state_directory_variable_is_ignored() {
         let env = Env::new(&["claude"]);
         let home = TempDir::new().unwrap();
@@ -525,9 +540,19 @@ esac
         );
 
         env.succeed(&["code", "review", LINK]);
+        assert_eq!(
+            env.succeed(&["code", "publish-comment", "--context", "only the typos"]),
+            "claude did it\n"
+        );
+        let cwd = env.logged("claude.cwd").unwrap();
+        assert_ne!(
+            Path::new(cwd.trim()),
+            env.work_dir(),
+            "publishing ran in the repository"
+        );
         assert!(
-            env.succeed(&["code", "publish-comment", "--context", "only the typos"])
-                .starts_with("claude did it\n\nResume: claude --resume ")
+            !Path::new(cwd.trim()).exists(),
+            "the publishing directory was left behind"
         );
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(LINK));

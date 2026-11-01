@@ -186,13 +186,56 @@ impl Agent {
     }
 
     pub fn perform(&self, task: &str, cancellation: &Cancellation) -> Result<Performed, Error> {
+        let (answer, id) = self.attempt(task, None, cancellation);
+        let Some(id) = id else {
+            answer?;
+            return Err(Error::NoSession(self.name.clone()));
+        };
+        let resume = self
+            .resume
+            .iter()
+            .copied()
+            .chain([id.as_str()])
+            .collect::<Vec<_>>()
+            .join(" ");
+        let report = answer
+            .and_then(|answer| self.outcome(answer))
+            .map_err(|source| Error::Resumable {
+                source: Box::new(source),
+                resume: resume.clone(),
+            })?;
+        Ok(Performed { report, resume })
+    }
+
+    // Runs away from the user's files. Its session cannot be resumed: agents keep sessions per
+    // directory, and this one is removed afterwards.
+    pub fn perform_isolated(
+        &self,
+        task: &str,
+        cancellation: &Cancellation,
+    ) -> Result<String, Error> {
+        let workdir = tempfile::Builder::new()
+            .prefix("ncli-")
+            .tempdir()
+            .map_err(Error::WorkingDirectory)?;
+        self.attempt(task, Some(workdir.path()), cancellation)
+            .0
+            .and_then(|answer| self.outcome(answer))
+    }
+
+    fn attempt(
+        &self,
+        task: &str,
+        cwd: Option<&Path>,
+        cancellation: &Cancellation,
+    ) -> (Result<String, Error>, Option<String>) {
         let prompt = format!(
             "{task}\n\n\
              When you are done, answer as JSON matching the given schema. Set completed to false if \
              you could not finish the task, and put in report the answer, or what you did and why."
         );
         let (args, assigned) = self.session.start();
-        let result = self.invoke(args, &prompt, Some(&TASK_SCHEMA), None, cancellation);
+        let result = self.invoke(args, &prompt, Some(&TASK_SCHEMA), cwd, cancellation);
         let ran = match &result {
             Ok(output) => Some(output.as_str()),
             Err(Error::Process(error)) if !matches!(error, ProcessError::Spawn { .. }) => {
@@ -203,24 +246,7 @@ impl Agent {
         let (id, answer) = ran.map_or((None, String::new()), |output| {
             self.session.read(assigned, output)
         });
-        let Some(id) = id else {
-            result?;
-            return Err(Error::NoSession(self.name.clone()));
-        };
-        let resume = self
-            .resume
-            .iter()
-            .copied()
-            .chain([id.as_str()])
-            .collect::<Vec<_>>()
-            .join(" ");
-        let report = result
-            .and_then(|_| self.outcome(answer))
-            .map_err(|source| Error::Resumable {
-                source: Box::new(source),
-                resume: resume.clone(),
-            })?;
-        Ok(Performed { report, resume })
+        (result.map(|_| answer), id)
     }
 
     fn outcome(&self, answer: String) -> Result<String, Error> {
