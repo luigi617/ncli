@@ -1,5 +1,7 @@
 use std::io;
+use std::path::PathBuf;
 
+use crate::commands::code::review::{Change, RemoteBranch};
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
 
@@ -23,8 +25,51 @@ pub enum Error {
     Incomplete { agent: String, report: String },
     #[error("{source}\nResume: {resume}")]
     Resumable { source: Box<Error>, resume: String },
-    #[error("the judge could not access the change at {0}")]
-    ChangeUnavailable(String),
+    #[error("the judge could not access {0}")]
+    ChangeUnavailable(Change),
+    #[error(
+        "the repository has no default branch to compare the current branch with; set one with `git remote set-head <remote> --auto`"
+    )]
+    NoDefaultBranch,
+    #[error(
+        "the repository has several default branches to compare the current branch with ({branches}) and none on {preferred}"
+    )]
+    AmbiguousDefaultBranch {
+        branches: String,
+        preferred: &'static str,
+    },
+    #[error("there is nothing to review in {}: no commits and no uncommitted changes", .0.display())]
+    NoCommits(PathBuf),
+    #[error(
+        "could not find a git work tree to review the local changes of; give a link instead: {0}"
+    )]
+    NotAWorkTree(#[source] ProcessError),
+    #[error("could not snapshot the uncommitted changes: {0}")]
+    Snapshot(#[source] io::Error),
+    #[error(
+        "there is nothing to review in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
+    )]
+    NoChanges { repo: PathBuf, base: RemoteBranch },
+    #[error(
+        "the current branch in {} has no history in common with {base}", .repo.display()
+    )]
+    NoCommonHistory { repo: PathBuf, base: RemoteBranch },
+    #[error(
+        "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
+    )]
+    DirtySubmodules { repo: PathBuf, submodules: String },
+    #[error(
+        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
+    )]
+    HiddenEdits(String),
+    #[error(
+        "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
+    )]
+    NestedRepositories(String),
+    #[error(
+        "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
+    )]
+    UndoneStagedChanges(String),
     #[error("the task is empty")]
     EmptyTask,
     #[error(
@@ -36,14 +81,16 @@ pub enum Error {
     #[error("there is no review to publish; run `ncli code review` first")]
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
-    NothingToPublish(String),
+    NothingToPublish(Change),
+    #[error("the last review was of {0}, which has nowhere to publish comments")]
+    Unpublishable(Change),
     #[error("there is no display to copy to; set WAYLAND_DISPLAY or DISPLAY")]
     NoClipboard,
     #[error("could not find a directory to save state in; set {DIR_VAR}")]
     NoStateDir,
     #[error("could not access the saved {entry}: {source}")]
     State { entry: Entry, source: io::Error },
-    #[error("the saved review is invalid: {0}")]
+    #[error("the saved review is invalid ({0}); run `ncli code review` again")]
     SavedReview(#[source] serde_json::Error),
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
@@ -84,13 +131,25 @@ impl Error {
             | Self::NoSession(_)
             | Self::Incomplete { .. }
             | Self::ChangeUnavailable(_)
+            | Self::NoDefaultBranch
+            | Self::AmbiguousDefaultBranch { .. }
+            | Self::NoCommits(_)
+            | Self::NotAWorkTree(_)
+            | Self::NoChanges { .. }
+            | Self::NoCommonHistory { .. }
+            | Self::DirtySubmodules { .. }
+            | Self::HiddenEdits(_)
+            | Self::NestedRepositories(_)
+            | Self::UndoneStagedChanges(_)
             | Self::NoOutput
             | Self::NoReview
             | Self::NothingToPublish(_)
+            | Self::Unpublishable(_)
             | Self::NoClipboard
             | Self::NoStateDir
             | Self::State { .. }
             | Self::SavedReview(_)
+            | Self::Snapshot(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)
             | Self::Process(_) => Self::FAILURE,

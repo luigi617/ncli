@@ -30,8 +30,13 @@ fn command_definition_is_valid() {
 #[test]
 fn review_takes_the_link_and_defaults_the_judge_to_claude() {
     let review = review(&[LINK]);
-    assert_eq!(review.link, LINK);
+    assert_eq!(review.link.as_deref(), Some(LINK));
     assert_eq!(review.judge, AgentKind::Claude);
+}
+
+#[test]
+fn review_without_a_link_reviews_the_local_changes() {
+    assert_eq!(review(&[]).link, None);
 }
 
 #[test]
