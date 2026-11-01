@@ -1,5 +1,4 @@
 use std::io;
-use std::path::PathBuf;
 
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
@@ -34,20 +33,12 @@ pub enum Error {
     NotATask(String),
     #[error("there is no last output")]
     NoOutput,
-    #[error("the output of the last command is still being recorded")]
-    StillRecording,
     #[error("there is no review to publish; run `ncli code review` first")]
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
     NothingToPublish(String),
     #[error("there is no display to copy to; set WAYLAND_DISPLAY or DISPLAY")]
     NoClipboard,
-    #[error("could not find your home directory")]
-    NoHome,
-    #[error("could not update {}: {source}", .path.display())]
-    StartupFile { path: PathBuf, source: io::Error },
-    #[error("the state directory {0} is not valid UTF-8")]
-    NonUtf8StateDir(PathBuf),
     #[error("could not find a directory to save state in; set {DIR_VAR}")]
     NoStateDir,
     #[error("could not access the saved {entry}: {source}")]
@@ -85,13 +76,9 @@ impl Error {
             | Self::Incomplete { .. }
             | Self::ChangeUnavailable(_)
             | Self::NoOutput
-            | Self::StillRecording
             | Self::NoReview
             | Self::NothingToPublish(_)
             | Self::NoClipboard
-            | Self::NoHome
-            | Self::StartupFile { .. }
-            | Self::NonUtf8StateDir(_)
             | Self::NoStateDir
             | Self::State { .. }
             | Self::SavedReview(_)

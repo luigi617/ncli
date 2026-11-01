@@ -305,30 +305,11 @@ esac
     }
 
     #[test]
-    fn an_unfinished_task_fails() {
-        let env = Env::new(&["claude"]);
-        let output = env
-            .ncli(&["fix the bug"])
-            .env("FAKE_COMPLETED", "false")
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
-        assert!(output.stdout.is_empty());
-        assert!(
-            stderr(&output).contains(
-                "ncli: error: claude could not finish the task: claude did it\nResume: claude --resume "
-            ),
-            "{}",
-            stderr(&output)
-        );
-    }
-
-    #[test]
     fn a_task_must_be_one_quoted_argument_of_several_words() {
         let env = Env::new(&["claude"]);
         for (args, word) in [
             (&["help"][..], "help"),
-            (&["inti", "zsh"], "inti zsh"),
+            (&["cdoe", "review"], "cdoe review"),
             (&["review", LINK], &format!("review {LINK}")),
             (&["fix", "the bug"], "fix the bug"),
         ] {
@@ -390,8 +371,12 @@ esac
             .env("FAKE_COMPLETED", "false")
             .output()
             .unwrap();
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert!(output.stdout.is_empty());
         let error = saved().unwrap();
-        assert!(error.starts_with("ncli: error: claude could not finish the task: "));
+        assert!(error.starts_with(
+            "ncli: error: claude could not finish the task: claude did it\nResume: claude --resume "
+        ));
         assert!(stderr(&output).trim_end().ends_with(&error), "{error}");
         env.run(&["copy"]);
         env.run(&["cpy"]);
@@ -468,6 +453,25 @@ esac
             "{}",
             stderr(&unrelated)
         );
+    }
+
+    #[test]
+    fn a_new_state_directory_is_private_and_an_existing_one_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = Env::new(&["claude"]);
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let new = env.state.path().join("new");
+        let output = env
+            .ncli(&["fix the bug"])
+            .env(ncli::state::DIR_VAR, &new)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(mode(&new), 0o700);
+        fs::set_permissions(env.state.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        env.succeed(&["fix the bug"]);
+        assert_eq!(mode(env.state.path()), 0o755);
     }
 
     #[test]
@@ -549,77 +553,6 @@ esac
             env.logged("clipboard")
                 .unwrap()
                 .starts_with("ncli: error: claude could not finish the task: ")
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn copy_puts_the_output_of_a_command_recorded_by_the_zsh_hook_on_the_clipboard() {
-        use std::io::Write;
-        use std::process::Stdio;
-        use std::thread;
-        use std::time::Duration;
-
-        let env = Env::new(&["claude", "pbcopy"]);
-        let ncli = env!("CARGO_BIN_EXE_ncli");
-        let lines = [
-            format!(r#"eval "$({ncli} init zsh)""#),
-            "ncli_captured=(sh)".to_owned(),
-            r#"FOO=1 sh -c 'echo hello; printf "\033[31mred\033[0m\n" >&2'"#.to_owned(),
-            "sh -c 'echo compound'; echo other".to_owned(),
-            "printf 'not recorded\\n'".to_owned(),
-            format!("{ncli} copy"),
-            r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/first""#.to_owned(),
-            "alias say='sh -c'".to_owned(),
-            "say 'echo aliased'".to_owned(),
-            format!("{ncli} copy"),
-            r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/aliased""#.to_owned(),
-            r#"sh -c 'echo early; (until [ -e "$NCLI_TEST_LOG/release" ]; do sleep 0.1; done; echo late) &'"#.to_owned(),
-            format!(r#"{ncli} copy 2> "$NCLI_TEST_LOG/still""#),
-            r#"touch "$NCLI_TEST_LOG/release""#.to_owned(),
-            "sleep 2".to_owned(),
-            format!("{ncli} copy"),
-            r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/late""#.to_owned(),
-            format!("{ncli} 'fix the bug'"),
-            format!("{ncli} copy"),
-            "exit".to_owned(),
-        ];
-        let mut zsh = Command::new("script")
-            .args(["-q", "/dev/null", "zsh", "-f", "-i"])
-            .current_dir(env.work.path())
-            .env(
-                "PATH",
-                format!("{}:/bin:/usr/bin", env.bin.path().display()),
-            )
-            .env("NCLI_TEST_LOG", env.log.path())
-            .env(ncli::state::DIR_VAR, env.state.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut stdin = zsh.stdin.take().unwrap();
-        for line in lines {
-            writeln!(stdin, "{line}").unwrap();
-            thread::sleep(Duration::from_millis(500));
-        }
-        assert!(zsh.wait().unwrap().success());
-        assert_eq!(env.logged("first").unwrap(), "hello\nred\n");
-        assert_eq!(
-            env.logged("still").unwrap().trim(),
-            "ncli copy: error: the output of the last command is still being recorded"
-        );
-        assert_eq!(env.logged("aliased").unwrap(), "aliased\n");
-        assert_eq!(env.logged("late").unwrap(), "early\nlate\n");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&env.state.path().join("terminal.txt")), 0o600);
-        }
-        assert!(
-            env.logged("clipboard")
-                .unwrap()
-                .starts_with("claude did it\n\nResume: ")
         );
     }
 

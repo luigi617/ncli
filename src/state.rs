@@ -11,8 +11,6 @@ pub const DIR_VAR: &str = "NCLI_STATE_DIR";
 pub enum Entry {
     Output,
     Review,
-    Terminal,
-    Recording,
     Failure,
 }
 
@@ -21,8 +19,6 @@ impl Entry {
         match self {
             Self::Output => "output.txt",
             Self::Review => "review.json",
-            Self::Terminal => "terminal.txt",
-            Self::Recording => "recording.txt",
             Self::Failure => "failure.txt",
         }
     }
@@ -33,8 +29,6 @@ impl fmt::Display for Entry {
         f.write_str(match self {
             Self::Output => "output",
             Self::Review => "review",
-            Self::Terminal => "terminal output",
-            Self::Recording => "recording",
             Self::Failure => "failure",
         })
     }
@@ -51,7 +45,7 @@ fn dir() -> Result<PathBuf, Error> {
         .ok_or(Error::NoStateDir)
 }
 
-pub fn path(entry: Entry) -> Result<PathBuf, Error> {
+fn path(entry: Entry) -> Result<PathBuf, Error> {
     let dir = dir()?;
     create_private(&dir).map_err(|source| Error::State { entry, source })?;
     Ok(dir.join(entry.file_name()))
@@ -88,32 +82,16 @@ pub fn load(entry: Entry) -> Result<Option<Vec<u8>>, Error> {
 }
 
 pub fn last_output() -> Result<String, Error> {
-    newest_output(&[
-        Entry::Output,
-        Entry::Terminal,
-        Entry::Recording,
-        Entry::Failure,
-    ])
+    newest_output(&[Entry::Output, Entry::Failure])
 }
 
 pub fn last_successful_output() -> Result<String, Error> {
-    newest_output(&[Entry::Output, Entry::Terminal, Entry::Recording])
+    newest_output(&[Entry::Output])
 }
 
 fn newest_output(entries: &[Entry]) -> Result<String, Error> {
-    let entry = match newest(entries)? {
-        Some(Entry::Recording) => {
-            let partial = load(Entry::Recording)?.unwrap_or_default();
-            if Path::new(String::from_utf8_lossy(&partial).trim_end()).exists() {
-                return Err(Error::StillRecording);
-            }
-            Entry::Terminal
-        }
-        Some(entry) => entry,
-        None => return Err(Error::NoOutput),
-    };
-    let output = load(entry)?.unwrap_or_default();
-    let output = String::from_utf8_lossy(&strip_ansi_escapes::strip(output)).into_owned();
+    let entry = newest(entries)?.ok_or(Error::NoOutput)?;
+    let output = String::from_utf8_lossy(&load(entry)?.unwrap_or_default()).into_owned();
     if output.trim().is_empty() {
         return Err(Error::NoOutput);
     }
