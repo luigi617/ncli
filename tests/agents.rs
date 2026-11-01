@@ -388,6 +388,41 @@ esac
             prompt.contains(&format!("<output>\n{succeeded}</output>")),
             "{prompt}"
         );
+        assert_eq!(saved(), None, "a success clears the saved failure");
+    }
+
+    #[test]
+    fn the_output_is_saved_even_when_it_cannot_be_printed() {
+        use std::process::Stdio;
+
+        let env = Env::new(&["claude"]);
+        let mut task = env
+            .ncli(&["fix the bug"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(task.stdout.take());
+        let output = task.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert!(stderr(&output).contains("could not write the output"));
+        let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
+        assert!(saved.starts_with("claude did it\n\nResume: "), "{saved}");
+    }
+
+    #[test]
+    fn an_empty_state_directory_variable_is_ignored() {
+        let env = Env::new(&["claude"]);
+        let home = TempDir::new().unwrap();
+        let output = env
+            .ncli(&["fix the bug"])
+            .env(ncli::state::DIR_VAR, "")
+            .env("HOME", home.path())
+            .env_remove("XDG_STATE_HOME")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!env.work.path().join("output.txt").exists());
     }
 
     #[test]
@@ -413,6 +448,7 @@ esac
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(&link));
         assert!(prompt.contains("Do not commit, do not push"));
+        assert!(prompt.contains("Address it only if it is correct and worth the change"));
         assert!(!prompt.contains("<context>"));
         assert_eq!(
             Path::new(env.logged("claude.cwd").unwrap().trim()),
@@ -492,7 +528,8 @@ esac
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(LINK));
         assert!(prompt.contains("<context>\nonly the typos\n</context>"));
-        assert!(prompt.contains("skip any that is already posted on the change"));
+        assert!(prompt.contains("Skip any that is already posted on the change"));
+        assert!(prompt.contains("any whose finding no longer applies"));
         assert!(prompt.contains(
             "File: README.md\nLine: 1\nBody:\n\n### 🟡 Low: Typo\n`README.md:1`\nA word is misspelled.\n\
              **Fix:** Correct the spelling."

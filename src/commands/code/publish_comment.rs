@@ -42,8 +42,9 @@ fn prompt(link: &str, findings: &[Finding]) -> String {
     format!(
         "Publish the review comments below on the code change at {link}, using your own tools and \
          skills. Post each comment at most once, as an inline comment on its file and line, with its \
-         body verbatim, and skip any that is already posted on the change. Do not modify any code \
-         and do not post anything else. In report, list the comments you posted and the ones you \
-         skipped.\n\n{comments}"
+         body verbatim. Skip any that is already posted on the change, and any whose finding no \
+         longer applies, since the change may have new commits since it was reviewed. Do not \
+         modify any code and do not post anything else. In report, list the comments you posted \
+         and the ones you skipped, with why.\n\n{comments}"
     )
 }

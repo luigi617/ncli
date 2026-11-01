@@ -66,11 +66,13 @@ fn report(prog: &str, error: &Error, record: bool) {
 }
 
 fn print(output: &Output) -> Result<(), Error> {
-    writeln!(io::stdout(), "{}", output.text).map_err(Error::Output)?;
-    output
+    let printed = writeln!(io::stdout(), "{}", output.text).map_err(Error::Output);
+    let saved = output
         .records
         .iter()
         .try_for_each(|(entry, contents)| state::save(*entry, contents))
+        .and_then(|()| state::remove(Entry::Failure));
+    printed.and(saved)
 }
 
 fn prog(matches: &ArgMatches) -> String {

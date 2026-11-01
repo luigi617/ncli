@@ -1,6 +1,5 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 use std::{env, fmt, fs};
 
 use crate::error::Error;
@@ -36,6 +35,7 @@ impl fmt::Display for Entry {
 
 fn dir() -> Result<PathBuf, Error> {
     env::var_os(DIR_VAR)
+        .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             dirs::state_dir()
@@ -81,36 +81,28 @@ pub fn load(entry: Entry) -> Result<Option<Vec<u8>>, Error> {
     found(entry, fs::read(dir()?.join(entry.file_name())))
 }
 
+pub fn remove(entry: Entry) -> Result<(), Error> {
+    found(entry, fs::remove_file(dir()?.join(entry.file_name()))).map(|_| ())
+}
+
+// A success removes the saved failure, so a failure that is still saved is the newest.
 pub fn last_output() -> Result<String, Error> {
-    newest_output(&[Entry::Output, Entry::Failure])
+    match load(Entry::Failure)? {
+        Some(failure) => text(failure),
+        None => last_successful_output(),
+    }
 }
 
 pub fn last_successful_output() -> Result<String, Error> {
-    newest_output(&[Entry::Output])
+    text(load(Entry::Output)?.unwrap_or_default())
 }
 
-fn newest_output(entries: &[Entry]) -> Result<String, Error> {
-    let entry = newest(entries)?.ok_or(Error::NoOutput)?;
-    let output = String::from_utf8_lossy(&load(entry)?.unwrap_or_default()).into_owned();
-    if output.trim().is_empty() {
+fn text(bytes: Vec<u8>) -> Result<String, Error> {
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if text.trim().is_empty() {
         return Err(Error::NoOutput);
     }
-    Ok(output)
-}
-
-fn newest(entries: &[Entry]) -> Result<Option<Entry>, Error> {
-    let mut newest: Option<(SystemTime, Entry)> = None;
-    for &entry in entries {
-        let modified =
-            fs::metadata(dir()?.join(entry.file_name())).and_then(|meta| meta.modified());
-        let Some(modified) = found(entry, modified)? else {
-            continue;
-        };
-        if newest.is_none_or(|(time, _)| modified > time) {
-            newest = Some((modified, entry));
-        }
-    }
-    Ok(newest.map(|(_, entry)| entry))
+    Ok(text)
 }
 
 fn found<T>(entry: Entry, result: io::Result<T>) -> Result<Option<T>, Error> {

@@ -52,7 +52,9 @@ impl Review {
         };
         let json = serde_json::to_string(&review).expect("a review serializes to JSON");
         let mut output = Output::from(text);
-        output.records.push((Entry::Review, json));
+        // Saved first: if this save fails, neither record changes, so the saved review and output
+        // still come from the same run.
+        output.records.insert(0, (Entry::Review, json));
         Ok(output)
     }
 }
