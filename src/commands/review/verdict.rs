@@ -1,12 +1,24 @@
 use std::fmt;
+use std::num::NonZeroU32;
+use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-pub const SCHEMA: &str = include_str!("verdict.schema.json");
+// Kept on one line: Windows cannot pass an argument containing a newline to a batch-file shim.
+static SCHEMA: LazyLock<String> = LazyLock::new(|| {
+    serde_json::from_str::<serde_json::Value>(include_str!("verdict.schema.json"))
+        .expect("the verdict schema is valid JSON")
+        .to_string()
+});
+
+pub fn schema() -> &'static str {
+    &SCHEMA
+}
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Verdict {
+    pub change_accessed: bool,
     pub findings: Vec<Finding>,
 }
 
@@ -16,7 +28,7 @@ pub struct Finding {
     pub severity: Severity,
     pub title: String,
     pub file: String,
-    pub line: u32,
+    pub line: NonZeroU32,
     pub explanation: String,
     pub fix: String,
 }

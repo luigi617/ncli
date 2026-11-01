@@ -9,7 +9,7 @@ use std::thread;
 use clap::{Args, ValueEnum};
 
 pub use reviewers::{Reviewer, ReviewerKind, SchemaArg};
-pub use verdict::{Finding, Severity, Verdict};
+pub use verdict::{Finding, Severity, Verdict, schema};
 
 use crate::error::Error;
 use crate::process::{self, Cancellation};
@@ -17,10 +17,10 @@ use crate::process::{self, Cancellation};
 type Answers<'a> = Vec<(&'a str, String)>;
 type Section<'a> = (String, &'a str);
 
-/// Review a PR/CR with several AI CLIs that debate their findings.
+/// Review a pull request with several AI CLIs that debate their findings.
 #[derive(Debug, Args)]
 pub struct Review {
-    /// URL of the pull request or code review
+    /// URL of the pull request
     pub link: String,
     /// Reviewer that writes the final verdict
     #[arg(long, value_enum, default_value_t)]
@@ -61,10 +61,14 @@ pub fn debate(
     progress("verdict");
     let verdict = judge.ask_structured(
         &prompts::judge(link, &transcript(&debate)),
-        verdict::SCHEMA,
+        verdict::schema(),
         cancellation,
     )?;
-    Verdict::parse(&verdict).map_err(Error::Verdict)
+    let verdict = Verdict::parse(&verdict).map_err(Error::Verdict)?;
+    if !verdict.change_accessed {
+        return Err(Error::ChangeUnavailable(link.to_owned()));
+    }
+    Ok(verdict)
 }
 
 fn transcript(sections: &[Section]) -> String {

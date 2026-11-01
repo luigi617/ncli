@@ -11,6 +11,8 @@ pub enum Error {
     WorkingDirectory(#[source] io::Error),
     #[error("the judge returned an invalid verdict: {0}")]
     Verdict(#[source] serde_json::Error),
+    #[error("the judge could not access the change at {0}")]
+    ChangeUnavailable(String),
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
     #[error("could not install the interrupt handler: {0}")]
@@ -28,6 +30,7 @@ impl Error {
             Self::MissingExecutables(_) => Self::MISSING_EXECUTABLE,
             Self::WorkingDirectory(_)
             | Self::Verdict(_)
+            | Self::ChangeUnavailable(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)
             | Self::Process(_) => Self::FAILURE,

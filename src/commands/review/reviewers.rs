@@ -20,14 +20,7 @@ impl ReviewerKind {
     pub fn reviewer(self) -> Reviewer {
         let (argv, schema_arg): (&[&str], _) = match self {
             Self::Claude => (
-                &[
-                    "claude",
-                    "--allowedTools",
-                    "Bash(gh pr view:*)",
-                    "Bash(gh pr diff:*)",
-                    "mcp__builder-mcp__CodeReviewReadActions",
-                    "--print",
-                ],
+                &["claude", "--dangerously-skip-permissions", "--print"],
                 SchemaArg::Inline("--json-schema"),
             ),
             Self::Codex => (

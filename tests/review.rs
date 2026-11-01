@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 const LINK: &str = "https://github.com/owner/repo/pull/1";
 const SCHEMA: &str = include_str!("../src/commands/review/verdict.schema.json");
-const ONE_FINDING: &str = r#"{"findings": [{"severity": "high", "title": "Bug", "file": "a.rs",
+const ONE_FINDING: &str = r#"{"change_accessed": true, "findings": [{"severity": "high", "title": "Bug", "file": "a.rs",
     "line": 3, "explanation": "It breaks.", "fix": "Fix it."}]}"#;
 
 fn reviewer(name: &str, args: &[&str]) -> Reviewer {
@@ -32,6 +32,13 @@ fn judge(dir: &Path, verdict: &str, schema_arg: SchemaArg) -> Reviewer {
 
 fn judge_received(dir: &Path, what: &str) -> String {
     fs::read_to_string(dir.join(format!("judge.{what}"))).unwrap()
+}
+
+fn assert_judge_received_the_schema(dir: &Path) {
+    let received = judge_received(dir, "schema");
+    assert!(!received.contains('\n'), "the schema must fit on one line");
+    let parse = |schema: &str| serde_json::from_str::<serde_json::Value>(schema).unwrap();
+    assert_eq!(parse(&received), parse(SCHEMA));
 }
 
 fn reviewers(dir: &Path) -> Vec<Reviewer> {
@@ -87,7 +94,7 @@ fn reviewers_review_rebut_and_judge() {
         assert!(verdict_prompt.contains(&format!("## Rebuttal: {name}\n\n{name} answer 1")));
     }
     assert_eq!(prompts(dir.path(), "c").len(), 2);
-    assert_eq!(judge_received(dir.path(), "schema"), SCHEMA);
+    assert_judge_received_the_schema(dir.path());
 }
 
 #[test]
@@ -96,7 +103,21 @@ fn the_schema_can_be_passed_as_a_file() {
     let reviewers = [reviewer("a", &["write", "a answer"])];
     let judge = judge(dir.path(), ONE_FINDING, SchemaArg::File("--schema-file"));
     run_debate(&reviewers, &judge).unwrap();
-    assert_eq!(judge_received(dir.path(), "schema"), SCHEMA);
+    assert_judge_received_the_schema(dir.path());
+}
+
+#[test]
+fn a_change_the_judge_could_not_access_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    let reviewers = [reviewer("a", &["write", "I could not open the link."])];
+    let unavailable = r#"{"change_accessed": false, "findings": []}"#;
+    let judge = judge(dir.path(), unavailable, SchemaArg::Inline("--schema"));
+    let error = run_debate(&reviewers, &judge).unwrap_err();
+    assert!(matches!(error, Error::ChangeUnavailable(_)), "{error}");
+    assert_eq!(
+        error.to_string(),
+        format!("the judge could not access the change at {LINK}")
+    );
 }
 
 #[test]
@@ -158,7 +179,7 @@ mod binary {
 cat > /dev/null
 case "$*" in
 *--output-schema*|*--json-schema*)
-    echo '{"findings": [{"severity": "low", "title": "Typo", "file": "README.md", "line": 1,
+    echo '{"change_accessed": true, "findings": [{"severity": "low", "title": "Typo", "file": "README.md", "line": 1,
         "explanation": "A word is misspelled.", "fix": "Correct the spelling."}]}' ;;
 *) echo "$(basename "$0") answer" ;;
 esac

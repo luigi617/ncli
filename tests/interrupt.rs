@@ -80,7 +80,7 @@ fn second_interrupt_exits_immediately() {
 cat > /dev/null
 case "$*" in
 *-schema*)
-    printf '{"findings": [{"severity": "low", "title": "t", "file": "f", "line": 1, "explanation": "'
+    printf '{"change_accessed": true, "findings": [{"severity": "low", "title": "t", "file": "f", "line": 1, "explanation": "'
     head -c 4000000 /dev/zero | tr '\0' x
     printf '", "fix": "x"}]}' ;;
 *) echo answer ;;

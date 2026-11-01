@@ -1,6 +1,6 @@
 use ncli::commands::review::Verdict;
 
-const VERDICT: &str = r#"{"findings": [
+const VERDICT: &str = r#"{"change_accessed": true, "findings": [
     {"severity": "low", "title": "Hard-coded tool name", "file": "src/reviewers.rs", "line": 23,
      "explanation": "It only exists in one environment.", "fix": "Move it to configuration."},
     {"severity": "high", "title": "Timeout ignored", "file": "src/process/unix.rs", "line": 201,
@@ -28,9 +28,9 @@ fn findings_render_most_severe_first_as_markdown() {
 
 #[test]
 fn counts_are_worded_for_people() {
-    let none = Verdict::parse(r#"{"findings": []}"#).unwrap();
+    let none = Verdict::parse(r#"{"change_accessed": true, "findings": []}"#).unwrap();
     assert_eq!(none.to_string(), "## ncli review: no findings");
-    let single = r#"{"findings": [{"severity": "medium", "title": "t", "file": "f", "line": 1,
+    let single = r#"{"change_accessed": true, "findings": [{"severity": "medium", "title": "t", "file": "f", "line": 1,
         "explanation": "e", "fix": "x"}]}"#;
     assert!(
         Verdict::parse(single)
@@ -42,14 +42,22 @@ fn counts_are_worded_for_people() {
 
 #[test]
 fn verdicts_that_do_not_match_the_schema_are_rejected() {
+    let finding = |line: &str| {
+        format!(
+            r#"{{"change_accessed": true, "findings": [{{"severity": "low", "title": "t",
+                "file": "f", "line": {line}, "explanation": "e", "fix": "x"}}]}}"#
+        )
+    };
     for invalid in [
-        "not json",
-        r#"{"findings": [{"severity": "critical", "title": "t", "file": "f", "line": 1,
-            "explanation": "e", "fix": "x"}]}"#,
-        r#"{"findings": [{"severity": "low", "title": "t", "file": "f", "line": 1,
-            "explanation": "e"}]}"#,
-        r#"{"findings": [], "summary": "unexpected"}"#,
+        "not json".to_owned(),
+        finding("0"),
+        finding("-1"),
+        finding("4294967296"),
+        r#"{"findings": []}"#.to_owned(),
+        finding("1").replace("\"low\"", "\"critical\""),
+        finding("1").replace(", \"fix\": \"x\"", ""),
+        r#"{"change_accessed": true, "findings": [], "summary": "unexpected"}"#.to_owned(),
     ] {
-        assert!(Verdict::parse(invalid).is_err(), "{invalid}");
+        assert!(Verdict::parse(&invalid).is_err(), "{invalid}");
     }
 }

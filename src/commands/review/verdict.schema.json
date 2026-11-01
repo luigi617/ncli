@@ -1,6 +1,7 @@
 {
   "type": "object",
   "properties": {
+    "change_accessed": { "type": "boolean" },
     "findings": {
       "type": "array",
       "items": {
@@ -9,7 +10,7 @@
           "severity": { "type": "string", "enum": ["high", "medium", "low"] },
           "title": { "type": "string" },
           "file": { "type": "string" },
-          "line": { "type": "integer" },
+          "line": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
           "explanation": { "type": "string" },
           "fix": { "type": "string" }
         },
@@ -18,6 +19,6 @@
       }
     }
   },
-  "required": ["findings"],
+  "required": ["change_accessed", "findings"],
   "additionalProperties": false
 }
