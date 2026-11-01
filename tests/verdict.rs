@@ -1,4 +1,4 @@
-use ncli::commands::review::Verdict;
+use ncli::commands::code::review::Verdict;
 
 const VERDICT: &str = r#"{"change_accessed": true, "findings": [
     {"severity": "low", "title": "Hard-coded tool name", "file": "src/reviewers.rs", "line": 23,
@@ -12,7 +12,7 @@ fn findings_render_most_severe_first_as_markdown() {
     let verdict = Verdict::parse(VERDICT).unwrap();
     assert_eq!(
         verdict.to_string(),
-        "## ncli review: 2 findings\n\
+        "## ncli code review: 2 findings\n\
          \n\
          ### 🔴 High: Timeout ignored\n\
          `src/process/unix.rs:201`\n\
@@ -29,14 +29,14 @@ fn findings_render_most_severe_first_as_markdown() {
 #[test]
 fn counts_are_worded_for_people() {
     let none = Verdict::parse(r#"{"change_accessed": true, "findings": []}"#).unwrap();
-    assert_eq!(none.to_string(), "## ncli review: no findings");
+    assert_eq!(none.to_string(), "## ncli code review: no findings");
     let single = r#"{"change_accessed": true, "findings": [{"severity": "medium", "title": "t", "file": "f", "line": 1,
         "explanation": "e", "fix": "x"}]}"#;
     assert!(
         Verdict::parse(single)
             .unwrap()
             .to_string()
-            .starts_with("## ncli review: 1 finding\n\n### 🟠 Medium: t")
+            .starts_with("## ncli code review: 1 finding\n\n### 🟠 Medium: t")
     );
 }
 
@@ -60,4 +60,28 @@ fn verdicts_that_do_not_match_the_schema_are_rejected() {
     ] {
         assert!(Verdict::parse(&invalid).is_err(), "{invalid}");
     }
+}
+
+#[test]
+fn model_text_cannot_break_the_markdown_structure() {
+    let verdict = Verdict::parse(
+        r#"{"change_accessed": true, "findings": [{"severity": "low",
+            "title": "Broken\n# heading", "file": "src/`odd`\nname.rs", "line": 2,
+            "explanation": "e", "fix": "x"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        verdict.to_string(),
+        "## ncli code review: 1 finding\n\n### 🟡 Low: Broken # heading\n``src/`odd` name.rs:2``\ne\n**Fix:** x"
+    );
+}
+
+#[test]
+fn a_location_starting_with_a_backtick_is_padded() {
+    let verdict = Verdict::parse(
+        r#"{"change_accessed": true, "findings": [{"severity": "low", "title": "t",
+            "file": "`f", "line": 1, "explanation": "e", "fix": "x"}]}"#,
+    )
+    .unwrap();
+    assert!(verdict.to_string().contains("\n`` `f:1 ``\n"));
 }

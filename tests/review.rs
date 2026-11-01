@@ -5,13 +5,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::child;
-use ncli::commands::review::{Reviewer, SchemaArg, Verdict, debate};
+use ncli::commands::code::review::{Reviewer, SchemaArg, Verdict, debate};
 use ncli::error::Error;
 use ncli::process::Cancellation;
 use tempfile::TempDir;
 
 const LINK: &str = "https://github.com/owner/repo/pull/1";
-const SCHEMA: &str = include_str!("../src/commands/review/verdict.schema.json");
+const SCHEMA: &str = include_str!("../src/commands/code/review/verdict.schema.json");
 const ONE_FINDING: &str = r#"{"change_accessed": true, "findings": [{"severity": "high", "title": "Bug", "file": "a.rs",
     "line": 3, "explanation": "It breaks.", "fix": "Fix it."}]}"#;
 
@@ -206,16 +206,16 @@ esac
     fn prints_only_the_verdict() {
         let output = run_ncli(
             &[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)],
-            &["review", LINK, "--judge", "codex"],
+            &["code", "review", LINK, "--judge", "codex"],
         );
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            "## ncli review: 1 finding\n\n### 🟡 Low: Typo\n`README.md:1`\n\
+            "## ncli code review: 1 finding\n\n### 🟡 Low: Typo\n`README.md:1`\n\
              A word is misspelled.\n**Fix:** Correct the spelling.\n"
         );
         let err = String::from_utf8(output.stderr).unwrap();
-        assert!(err.contains("ncli review: verdict..."));
+        assert!(err.contains("ncli code review: verdict..."));
     }
 
     #[test]
@@ -223,12 +223,12 @@ esac
         let broken = "#!/bin/sh\nkill -TERM $$\n";
         let output = run_ncli(
             &[("claude", FAKE_REVIEWER), ("codex", broken)],
-            &["review", LINK],
+            &["code", "review", LINK],
         );
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert!(output.stdout.is_empty());
         let err = String::from_utf8(output.stderr).unwrap();
-        assert!(err.contains("ncli review: error: codex was killed by signal 15"));
+        assert!(err.contains("ncli code review: error: codex was killed by signal 15"));
         assert!(err.contains("ncli: codex (attempt 1/3) failed: "));
     }
 }

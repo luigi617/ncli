@@ -30,7 +30,7 @@ fn version_prints_and_exits_zero() {
 
 #[test]
 fn usage_errors_exit_two() {
-    for args in [&[][..], &["nope"], &["review"]] {
+    for args in [&[][..], &["nope"], &["code"], &["code", "review"]] {
         assert_eq!(
             ncli(args).output().unwrap().status.code(),
             Some(2),
@@ -41,17 +41,17 @@ fn usage_errors_exit_two() {
 
 #[test]
 fn help_works_without_required_executables() {
-    let output = with_path(&["review", "--help"], &[]);
+    let output = with_path(&["code", "review", "--help"], &[]);
     assert!(output.status.success());
 }
 
 #[test]
 fn missing_executables_stop_before_run_with_the_full_command_path() {
-    let output = with_path(&["review", "https://example.com/pr/1"], &["claude"]);
+    let output = with_path(&["code", "review", "https://example.com/pr/1"], &["claude"]);
     assert_eq!(output.status.code(), Some(Error::MISSING_EXECUTABLE.into()));
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr).trim(),
-        "ncli review: error: required executables not found on PATH: codex"
+        "ncli code review: error: required executables not found on PATH: codex"
     );
 }

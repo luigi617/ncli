@@ -17,7 +17,7 @@ fn review_with(dir: &Path, reviewer: &str) -> Child {
         script(dir, name, reviewer);
     }
     Command::new(env!("CARGO_BIN_EXE_ncli"))
-        .args(["review", "https://example.com/pr/1"])
+        .args(["code", "review", "https://example.com/pr/1"])
         .env("PATH", format!("{}:/bin:/usr/bin", dir.display()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

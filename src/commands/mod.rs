@@ -1,4 +1,4 @@
-pub mod review;
+pub mod code;
 
 use clap::Subcommand;
 
@@ -7,13 +7,14 @@ use crate::process::Cancellation;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Review(review::Review),
+    #[command(subcommand)]
+    Code(code::CodeCommand),
 }
 
 impl Command {
     pub fn run(&self, cancellation: &Cancellation) -> Result<(), Error> {
         match self {
-            Self::Review(review) => review.run(cancellation),
+            Self::Code(command) => command.run(cancellation),
         }
     }
 }

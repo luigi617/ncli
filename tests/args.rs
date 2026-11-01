@@ -2,13 +2,14 @@ use clap::error::ErrorKind;
 use clap::{CommandFactory, Parser};
 use ncli::cli::Ncli;
 use ncli::commands::Command;
-use ncli::commands::review::{Review, ReviewerKind};
+use ncli::commands::code::CodeCommand;
+use ncli::commands::code::review::{Review, ReviewerKind};
 
 const LINK: &str = "https://example.com/pr/1";
 
 fn review(argv: &[&str]) -> Review {
-    let ncli = Ncli::try_parse_from(["ncli", "review"].iter().chain(argv)).unwrap();
-    let Command::Review(review) = ncli.command;
+    let ncli = Ncli::try_parse_from(["ncli", "code", "review"].iter().chain(argv)).unwrap();
+    let Command::Code(CodeCommand::Review(review)) = ncli.command;
     review
 }
 
@@ -37,7 +38,7 @@ fn judge_accepts_known_reviewers_only() {
         ReviewerKind::Codex
     );
     assert_eq!(
-        error_kind(&["review", LINK, "--judge", "gemini"]),
+        error_kind(&["code", "review", LINK, "--judge", "gemini"]),
         ErrorKind::InvalidValue
     );
 }

@@ -14,6 +14,8 @@ pub use verdict::{Finding, Severity, Verdict, schema};
 use crate::error::Error;
 use crate::process::{self, Cancellation};
 
+pub const COMMAND: &str = "ncli code review";
+
 type Answers<'a> = Vec<(&'a str, String)>;
 type Section<'a> = (String, &'a str);
 
@@ -90,7 +92,7 @@ fn sections<'a>(
 }
 
 fn progress(stage: &str) {
-    eprintln!("ncli review: {stage}...");
+    eprintln!("{COMMAND}: {stage}...");
 }
 
 fn ask_all<'a>(
