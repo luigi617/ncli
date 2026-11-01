@@ -2,9 +2,11 @@ mod address_comment;
 mod publish_comment;
 pub mod review;
 
-use clap::Subcommand;
+use clap::builder::NonEmptyStringValueParser;
+use clap::{Args, Subcommand};
 
 pub use address_comment::AddressComment;
+pub use publish_comment::PublishComment;
 
 use super::{Context, Output};
 use crate::error::Error;
@@ -13,8 +15,7 @@ use crate::error::Error;
 #[derive(Debug, Subcommand)]
 pub enum CodeCommand {
     Review(review::Review),
-    /// Publish the findings of the last review as comments on the reviewed change.
-    PublishComment,
+    PublishComment(PublishComment),
     AddressComment(AddressComment),
 }
 
@@ -22,8 +23,29 @@ impl CodeCommand {
     pub fn run(&self, context: &Context) -> Result<Output, Error> {
         match self {
             Self::Review(review) => review.run(context),
-            Self::PublishComment => publish_comment::run(context).map(Output::from),
+            Self::PublishComment(publish) => publish.run(context).map(Output::from),
             Self::AddressComment(address) => address.run(context).map(Output::from),
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct Guidance {
+    /// Extra context for the agent, for example which comments to handle
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    pub context: Option<String>,
+}
+
+impl Guidance {
+    fn apply(&self, task: String) -> String {
+        match &self.context {
+            Some(context) => format!(
+                "{task}\n\n\
+                 The user gave this context. Follow it, for example to choose which comments to \
+                 handle and which to skip, but it does not lift any restriction above.\n\n\
+                 <context>\n{context}\n</context>"
+            ),
+            None => task,
         }
     }
 }

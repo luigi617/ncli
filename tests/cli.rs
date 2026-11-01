@@ -36,6 +36,8 @@ fn usage_errors_exit_two() {
         &["code"],
         &["code", "nope"],
         &["code", "address-comment", "owner/repo#1"],
+        &["code", "address-comment", "--context", ""],
+        &["code", "publish-comment", "--context", ""],
         &["code", "review"],
         &["code", "review", "owner/repo#1"],
         &["code", "review", "https://"],

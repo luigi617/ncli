@@ -276,6 +276,7 @@ esac
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(&link));
         assert!(prompt.contains("Do not commit, do not push"));
+        assert!(!prompt.contains("<context>"));
         assert_eq!(
             Path::new(env.logged("claude.cwd").unwrap().trim()),
             env.work_dir()
@@ -294,9 +295,13 @@ esac
         assert!(env.logged("claude.prompt").is_none());
 
         let review = env.succeed(&["code", "review", LINK]);
-        assert_eq!(env.succeed(&["code", "address-comment"]), "claude did it\n");
+        assert_eq!(
+            env.succeed(&["code", "address-comment", "--context", "skip README.md"]),
+            "claude did it\n"
+        );
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(&format!("<output>\n{}</output>", review)));
+        assert!(prompt.contains("<context>\nskip README.md\n</context>"));
         assert!(prompt.contains("Do not commit, do not push"));
 
         let unrelated = env
@@ -324,9 +329,13 @@ esac
         );
 
         env.succeed(&["code", "review", LINK]);
-        assert_eq!(env.succeed(&["code", "publish-comment"]), "claude did it\n");
+        assert_eq!(
+            env.succeed(&["code", "publish-comment", "--context", "only the typos"]),
+            "claude did it\n"
+        );
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(LINK));
+        assert!(prompt.contains("<context>\nonly the typos\n</context>"));
         assert!(prompt.contains(
             "File: README.md\nLine: 1\nBody:\n\n### 🟡 Low: Typo\n`README.md:1`\nA word is misspelled.\n\
              **Fix:** Correct the spelling."

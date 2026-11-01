@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::parse_link;
+use super::{Guidance, parse_link};
 use crate::agent::AgentKind;
 use crate::commands::Context;
 use crate::error::Error;
@@ -12,6 +12,8 @@ pub struct AddressComment {
     /// URL of the pull request, or of one of its comments [default: the last output]
     #[arg(value_parser = parse_link)]
     pub link: Option<String>,
+    #[command(flatten)]
+    pub guidance: Guidance,
 }
 
 impl AddressComment {
@@ -25,7 +27,9 @@ impl AddressComment {
             "{feedback} Do not commit, do not push, and do not reply to or resolve any comment. In \
              report, summarize the change you made for each comment."
         );
-        Ok(agent.perform(&task, context.cancellation)?.report)
+        Ok(agent
+            .perform(&self.guidance.apply(task), context.cancellation)?
+            .report)
     }
 }
 
