@@ -1,12 +1,13 @@
-use std::iter;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
-use crate::commands::{Command, Context};
+use crate::commands::{Command, Context, Output};
 use crate::error::Error;
 use crate::interrupt;
 use crate::process::Cancellation;
+use crate::state;
 use crate::stderr;
 
 /// Run workflows that chain other CLIs.
@@ -16,7 +17,9 @@ use crate::stderr;
     version,
     infer_long_args = true,
     args_override_self = true,
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    after_help = "Any other command is a task for the first installed of claude and codex, \
+                  for example: ncli \"fix the failing test\""
 )]
 pub struct Ncli {
     #[command(subcommand)]
@@ -34,7 +37,8 @@ pub fn run() -> ExitCode {
     };
     let result = interrupt::install()
         .map_err(Error::InterruptHandler)
-        .and_then(|()| ncli.command.run(&context));
+        .and_then(|()| ncli.command.run(&context))
+        .and_then(|output| output.map_or(Ok(()), |output| print(&output)));
     if cancellation.is_cancelled() {
         interrupt::exit();
     }
@@ -47,11 +51,24 @@ pub fn run() -> ExitCode {
     }
 }
 
+fn print(output: &Output) -> Result<(), Error> {
+    writeln!(io::stdout(), "{}", output.text).map_err(Error::Output)?;
+    output
+        .records
+        .iter()
+        .try_for_each(|(entry, contents)| state::save(*entry, contents))
+}
+
 fn prog(matches: &ArgMatches) -> String {
-    let root = Ncli::command().get_name().to_owned();
-    let subcommands = iter::successors(matches.subcommand(), |(_, sub)| sub.subcommand());
-    iter::once(root)
-        .chain(subcommands.map(|(name, _)| name.to_owned()))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let root = Ncli::command();
+    let mut names = vec![root.get_name().to_owned()];
+    let (mut command, mut matches) = (&root, matches);
+    while let Some((name, sub_matches)) = matches.subcommand() {
+        let Some(subcommand) = command.find_subcommand(name) else {
+            break;
+        };
+        names.push(name.to_owned());
+        (command, matches) = (subcommand, sub_matches);
+    }
+    names.join(" ")
 }

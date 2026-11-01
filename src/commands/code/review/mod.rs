@@ -1,19 +1,21 @@
 mod prompts;
-mod reviewers;
 mod verdict;
 
-use std::io::{self, Write};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use clap::{Args, ValueEnum};
+use serde::{Deserialize, Serialize};
 
-pub use reviewers::{Reviewer, ReviewerKind, SchemaArg};
-pub use verdict::{Report, SCHEMA, Verdict};
+pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
-use crate::commands::Context;
+use super::parse_link;
+use crate::agent::{Agent, AgentKind};
+use crate::commands::{Context, Output};
 use crate::error::Error;
-use crate::process;
+use crate::process::{self, Cancellation};
+use crate::state::{self, Entry};
 use crate::stderr;
 
 type Answers<'a> = Vec<(&'a str, String)>;
@@ -27,43 +29,76 @@ pub struct Review {
     pub link: String,
     /// Reviewer that writes the final verdict
     #[arg(long, value_enum, default_value_t)]
-    pub judge: ReviewerKind,
+    pub judge: AgentKind,
 }
 
 impl Review {
-    pub fn run(&self, context: &Context) -> Result<(), Error> {
-        let reviewers: Vec<Reviewer> = ReviewerKind::value_variants()
+    pub fn run(&self, context: &Context) -> Result<Output, Error> {
+        let reviewers: Vec<Agent> = AgentKind::value_variants()
             .iter()
-            .map(|kind| kind.reviewer())
+            .map(|&kind| reviewer(kind))
             .collect();
         process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
-        let judge = self.judge.reviewer();
+        let judge = reviewer(self.judge);
         let verdict = debate(&self.link, &reviewers, &judge, context)?;
-        let report = Report {
+        let text = Report {
             prog: context.prog,
             verdict: &verdict,
+        }
+        .to_string();
+        let review = LastReview {
+            link: self.link.clone(),
+            verdict,
         };
-        writeln!(io::stdout(), "{report}").map_err(Error::Output)
+        let json = serde_json::to_string(&review).expect("a review serializes to JSON");
+        let mut output = Output::from(text);
+        output.records.push((Entry::Review, json));
+        Ok(output)
     }
 }
 
-fn parse_link(link: &str) -> Result<String, String> {
-    let host = ["https://", "http://"]
-        .iter()
-        .find_map(|scheme| link.strip_prefix(scheme))
-        .and_then(|rest| rest.split(['/', '?', '#']).next());
-    match host {
-        Some(host) if !host.is_empty() && !link.contains(char::is_whitespace) => {
-            Ok(link.to_owned())
-        }
-        _ => Err("expected an http(s) URL".to_owned()),
+#[derive(Serialize, Deserialize)]
+pub struct LastReview {
+    pub link: String,
+    pub verdict: Verdict,
+}
+
+impl LastReview {
+    pub fn load() -> Result<Self, Error> {
+        let json = state::load(Entry::Review)?.ok_or(Error::NoReview)?;
+        serde_json::from_slice(&json).map_err(Error::SavedReview)
     }
+}
+
+fn reviewer(kind: AgentKind) -> Agent {
+    let agent = kind.agent();
+    Agent {
+        cli: agent
+            .cli
+            .timeout(Duration::from_secs(30 * 60))
+            .attempts(3)
+            .retry_delay(Duration::from_secs(10)),
+        ..agent
+    }
+}
+
+fn ask(
+    reviewer: &Agent,
+    prompt: &str,
+    schema: Option<&str>,
+    cancellation: &Cancellation,
+) -> Result<String, Error> {
+    let workdir = tempfile::Builder::new()
+        .prefix("ncli-review-")
+        .tempdir()
+        .map_err(Error::WorkingDirectory)?;
+    reviewer.ask(prompt, schema, Some(workdir.path()), cancellation)
 }
 
 pub fn debate(
     link: &str,
-    reviewers: &[Reviewer],
-    judge: &Reviewer,
+    reviewers: &[Agent],
+    judge: &Agent,
     context: &Context,
 ) -> Result<Verdict, Error> {
     let reviews = ask_all(reviewers, "review", context, |_| prompts::review(link))?;
@@ -79,12 +114,14 @@ pub fn debate(
     })?;
     debate.extend(sections("Rebuttal", &rebuttals));
     progress(context, "verdict");
-    let verdict = judge.ask(
+    let verdict = ask(
+        judge,
         &prompts::judge(link, &transcript(&debate)),
         Some(&SCHEMA),
         context.cancellation,
     )?;
-    let verdict = Verdict::parse(&verdict).map_err(|source| Error::Verdict {
+    let verdict = Verdict::parse(&verdict).map_err(|source| Error::InvalidAnswer {
+        agent: judge.name.clone(),
         source,
         output: verdict,
     })?;
@@ -117,7 +154,7 @@ fn progress(context: &Context, stage: &str) {
 }
 
 fn ask_all<'a>(
-    reviewers: &'a [Reviewer],
+    reviewers: &'a [Agent],
     stage: &str,
     context: &Context,
     prompt_for: impl Fn(&str) -> String + Sync,
@@ -133,8 +170,12 @@ fn ask_all<'a>(
                 let sender = sender.clone();
                 let (prompt_for, stage_cancellation) = (&prompt_for, &stage_cancellation);
                 scope.spawn(move || {
-                    let answer =
-                        reviewer.ask(&prompt_for(&reviewer.name), None, stage_cancellation);
+                    let answer = ask(
+                        reviewer,
+                        &prompt_for(&reviewer.name),
+                        None,
+                        stage_cancellation,
+                    );
                     let _ = sender.send((index, answer));
                 })
             })

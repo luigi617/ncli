@@ -5,8 +5,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::child;
+use ncli::agent::{Agent, SchemaArg, Session};
 use ncli::commands::Context;
-use ncli::commands::code::review::{Reviewer, SCHEMA, SchemaArg, Verdict, debate};
+use ncli::commands::code::review::{SCHEMA, Verdict, debate};
 use ncli::error::Error;
 use ncli::process::Cancellation;
 use tempfile::TempDir;
@@ -15,16 +16,18 @@ const LINK: &str = "https://github.com/owner/repo/pull/1";
 const ONE_FINDING: &str = r#"{"change_accessed": true, "findings": [{"severity": "high", "title": "Bug", "file": "a.rs",
     "line": 3, "explanation": "It breaks.", "fix": "Fix it."}]}"#;
 
-fn reviewer(name: &str, args: &[&str]) -> Reviewer {
-    Reviewer {
+fn reviewer(name: &str, args: &[&str]) -> Agent {
+    Agent {
         name: name.to_owned(),
         cli: child(args),
         schema_arg: SchemaArg::Inline("--schema"),
+        session: Session::Assigned("--session"),
+        resume: &[],
     }
 }
 
-fn judge(dir: &Path, verdict: &str, schema_arg: SchemaArg) -> Reviewer {
-    Reviewer {
+fn judge(dir: &Path, verdict: &str, schema_arg: SchemaArg) -> Agent {
+    Agent {
         schema_arg,
         ..reviewer("judge", &["verdict", dir.to_str().unwrap(), verdict])
     }
@@ -40,7 +43,7 @@ fn assert_judge_received_the_schema(dir: &Path) {
     assert_eq!(received, *SCHEMA);
 }
 
-fn reviewers(dir: &Path) -> Vec<Reviewer> {
+fn reviewers(dir: &Path) -> Vec<Agent> {
     let dir = dir.to_str().unwrap();
     ["a", "b", "c"]
         .into_iter()
@@ -64,7 +67,7 @@ fn prompts(dir: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
-fn run_debate(reviewers: &[Reviewer], judge: &Reviewer) -> Result<Verdict, Error> {
+fn run_debate(reviewers: &[Agent], judge: &Agent) -> Result<Verdict, Error> {
     let context = Context {
         prog: "ncli code review",
         cancellation: &Cancellation::default(),
@@ -133,7 +136,7 @@ fn an_invalid_verdict_is_an_error() {
         SchemaArg::Inline("--schema"),
     );
     let error = run_debate(&reviewers, &judge).unwrap_err();
-    assert!(matches!(error, Error::Verdict { .. }), "{error}");
+    assert!(matches!(error, Error::InvalidAnswer { .. }), "{error}");
     assert!(
         error.to_string().ends_with(": Looks good to me!"),
         "{error}"
@@ -175,10 +178,10 @@ fn every_call_runs_in_its_own_working_directory() {
 
 #[cfg(unix)]
 mod binary {
-    use std::process::{Command, Output, Stdio};
+    use std::process::{Output, Stdio};
 
     use super::LINK;
-    use crate::common::script;
+    use crate::common::{ncli, script};
     use ncli::error::Error;
     use tempfile::TempDir;
 
@@ -202,7 +205,7 @@ esac
             dir.path().display(),
             std::env::var("PATH").unwrap()
         );
-        Command::new(env!("CARGO_BIN_EXE_ncli"))
+        ncli(&dir.path().join("state"))
             .args(args)
             .env("PATH", path)
             .output()
@@ -233,7 +236,7 @@ esac
         for name in ["claude", "codex"] {
             script(dir.path(), name, FAKE_REVIEWER);
         }
-        let mut ncli = Command::new(env!("CARGO_BIN_EXE_ncli"))
+        let mut ncli = ncli(&dir.path().join("state"))
             .args(["code", "review", LINK])
             .env("PATH", format!("{}:/bin:/usr/bin", dir.path().display()))
             .stdout(Stdio::piped())

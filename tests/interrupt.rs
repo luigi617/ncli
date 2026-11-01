@@ -9,14 +9,14 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use common::script;
+use common::{ncli, script};
 use tempfile::TempDir;
 
 fn review_command(dir: &Path, reviewer: &str) -> Command {
     for name in ["claude", "codex"] {
         script(dir, name, reviewer);
     }
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ncli"));
+    let mut command = ncli(&dir.join("state"));
     command
         .args(["code", "review", "https://example.com/pr/1"])
         .env("PATH", format!("{}:/bin:/usr/bin", dir.display()))

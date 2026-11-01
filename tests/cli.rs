@@ -32,8 +32,11 @@ fn version_prints_and_exits_zero() {
 fn usage_errors_exit_two() {
     for args in [
         &[][..],
-        &["nope"],
+        &["--nope"],
         &["code"],
+        &["code", "nope"],
+        &["code", "address-comment"],
+        &["code", "address-comment", "owner/repo#1"],
         &["code", "review"],
         &["code", "review", "owner/repo#1"],
         &["code", "review", "https://"],

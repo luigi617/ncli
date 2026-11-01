@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "properties": {
+    "completed": { "type": "boolean" },
+    "report": { "type": "string" }
+  },
+  "required": ["completed", "report"],
+  "additionalProperties": false
+}

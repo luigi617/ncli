@@ -65,6 +65,10 @@ fn detail(stderr_tail: &str) -> String {
 #[error("required executables not found on PATH: {}", join_lossy(.0))]
 pub struct MissingExecutables(pub Vec<OsString>);
 
+#[derive(Debug, thiserror::Error)]
+#[error("none of these executables were found on PATH: {}", join_lossy(.0))]
+pub struct NoExecutable(pub Vec<OsString>);
+
 fn join_lossy(names: &[OsString]) -> String {
     names
         .iter()
@@ -92,6 +96,20 @@ pub fn require_executables<'a>(
     } else {
         Err(MissingExecutables(missing))
     }
+}
+
+pub fn first_available<T>(
+    candidates: impl IntoIterator<Item = T>,
+    executable: impl Fn(&T) -> &OsStr,
+) -> Result<T, NoExecutable> {
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        if which::which(executable(&candidate)).is_ok() {
+            return Ok(candidate);
+        }
+        tried.push(executable(&candidate).to_owned());
+    }
+    Err(NoExecutable(tried))
 }
 
 pub struct Call<'a> {

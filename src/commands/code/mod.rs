@@ -1,20 +1,42 @@
+mod address_comment;
+mod publish_comment;
 pub mod review;
 
 use clap::Subcommand;
 
-use super::Context;
+pub use address_comment::AddressComment;
+
+use super::{Context, Output};
 use crate::error::Error;
 
 /// Work with code changes.
 #[derive(Debug, Subcommand)]
 pub enum CodeCommand {
     Review(review::Review),
+    /// Publish the findings of the last review as comments on the reviewed change.
+    PublishComment,
+    AddressComment(AddressComment),
 }
 
 impl CodeCommand {
-    pub fn run(&self, context: &Context) -> Result<(), Error> {
+    pub fn run(&self, context: &Context) -> Result<Output, Error> {
         match self {
             Self::Review(review) => review.run(context),
+            Self::PublishComment => publish_comment::run(context).map(Output::from),
+            Self::AddressComment(address) => address.run(context).map(Output::from),
         }
+    }
+}
+
+fn parse_link(link: &str) -> Result<String, String> {
+    let host = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| link.strip_prefix(scheme))
+        .and_then(|rest| rest.split(['/', '?', '#']).next());
+    match host {
+        Some(host) if !host.is_empty() && !link.contains(char::is_whitespace) => {
+            Ok(link.to_owned())
+        }
+        _ => Err("expected an http(s) URL".to_owned()),
     }
 }
