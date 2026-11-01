@@ -105,6 +105,7 @@ fn reviewers_review_rebut_and_judge() {
 
     let verdict_prompt = judge_received(dir.path(), "prompt");
     assert!(verdict_prompt.contains("Keep a bug only if it was reproduced."));
+    assert!(verdict_prompt.contains(ncli::agent::STYLE));
     assert!(verdict_prompt.contains("No findings is the right verdict for a good change."));
     for name in ["a", "b", "c"] {
         assert!(verdict_prompt.contains(&format!("## Review: {name}\n\n{name} answer 0")));

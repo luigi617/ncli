@@ -1,9 +1,9 @@
 use clap::Args;
 
-use super::Guidance;
 use super::review::{Change, Finding, LastReview};
 use crate::agent::AgentKind;
 use crate::commands::Context;
+use crate::commands::Guidance;
 use crate::error::Error;
 
 /// Publish the findings of the last review as comments on the reviewed change.

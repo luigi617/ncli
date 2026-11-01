@@ -99,6 +99,10 @@ pub enum Error {
     NotATask(String),
     #[error("there is no last output")]
     NoOutput,
+    #[error("no claude or codex sessions were active on {0}")]
+    NoSessions(jiff::civil::Date),
+    #[error("could not read the sessions in {}: {source}", .dir.display())]
+    Sessions { dir: PathBuf, source: io::Error },
     #[error("there is no review to publish; run `ncli code review` first")]
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
@@ -167,6 +171,8 @@ impl Error {
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
             | Self::NoOutput
+            | Self::NoSessions(_)
+            | Self::Sessions { .. }
             | Self::NoReview
             | Self::NothingToPublish(_)
             | Self::Unpublishable(_)
