@@ -9,12 +9,12 @@ use std::thread;
 use clap::{Args, ValueEnum};
 
 pub use reviewers::{Reviewer, ReviewerKind, SchemaArg};
-pub use verdict::{Finding, Severity, Verdict, schema};
+pub use verdict::{Report, Verdict, schema};
 
+use crate::commands::Context;
 use crate::error::Error;
-use crate::process::{self, Cancellation};
-
-pub const COMMAND: &str = "ncli code review";
+use crate::process;
+use crate::stderr;
 
 type Answers<'a> = Vec<(&'a str, String)>;
 type Section<'a> = (String, &'a str);
@@ -23,6 +23,7 @@ type Section<'a> = (String, &'a str);
 #[derive(Debug, Args)]
 pub struct Review {
     /// URL of the pull request
+    #[arg(value_parser = parse_link)]
     pub link: String,
     /// Reviewer that writes the final verdict
     #[arg(long, value_enum, default_value_t)]
@@ -30,15 +31,32 @@ pub struct Review {
 }
 
 impl Review {
-    pub fn run(&self, cancellation: &Cancellation) -> Result<(), Error> {
+    pub fn run(&self, context: &Context) -> Result<(), Error> {
         let reviewers: Vec<Reviewer> = ReviewerKind::value_variants()
             .iter()
             .map(|kind| kind.reviewer())
             .collect();
         process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
         let judge = self.judge.reviewer();
-        let verdict = debate(&self.link, &reviewers, &judge, cancellation)?;
-        writeln!(io::stdout(), "{verdict}").map_err(Error::Output)
+        let verdict = debate(&self.link, &reviewers, &judge, context)?;
+        let report = Report {
+            prog: context.prog,
+            verdict: &verdict,
+        };
+        writeln!(io::stdout(), "{report}").map_err(Error::Output)
+    }
+}
+
+fn parse_link(link: &str) -> Result<String, String> {
+    let host = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| link.strip_prefix(scheme))
+        .and_then(|rest| rest.split(['/', '?', '#']).next());
+    match host {
+        Some(host) if !host.is_empty() && !link.contains(char::is_whitespace) => {
+            Ok(link.to_owned())
+        }
+        _ => Err("expected an http(s) URL".to_owned()),
     }
 }
 
@@ -46,11 +64,11 @@ pub fn debate(
     link: &str,
     reviewers: &[Reviewer],
     judge: &Reviewer,
-    cancellation: &Cancellation,
+    context: &Context,
 ) -> Result<Verdict, Error> {
-    let reviews = ask_all(reviewers, "review", cancellation, |_| prompts::review(link))?;
+    let reviews = ask_all(reviewers, "review", context, |_| prompts::review(link))?;
     let mut debate = sections("Review", &reviews);
-    let rebuttals = ask_all(reviewers, "rebuttal", cancellation, |name| {
+    let rebuttals = ask_all(reviewers, "rebuttal", context, |name| {
         let own = reviews
             .iter()
             .find(|(other, _)| *other == name)
@@ -60,13 +78,16 @@ pub fn debate(
         prompts::rebuttal(link, own, &transcript(&others))
     })?;
     debate.extend(sections("Rebuttal", &rebuttals));
-    progress("verdict");
+    progress(context, "verdict");
     let verdict = judge.ask_structured(
         &prompts::judge(link, &transcript(&debate)),
         verdict::schema(),
-        cancellation,
+        context.cancellation,
     )?;
-    let verdict = Verdict::parse(&verdict).map_err(Error::Verdict)?;
+    let verdict = Verdict::parse(&verdict).map_err(|source| Error::Verdict {
+        source,
+        output: verdict,
+    })?;
     if !verdict.change_accessed {
         return Err(Error::ChangeUnavailable(link.to_owned()));
     }
@@ -91,18 +112,18 @@ fn sections<'a>(
         .collect()
 }
 
-fn progress(stage: &str) {
-    eprintln!("{COMMAND}: {stage}...");
+fn progress(context: &Context, stage: &str) {
+    stderr::line(format_args!("{}: {stage}...", context.prog));
 }
 
 fn ask_all<'a>(
     reviewers: &'a [Reviewer],
     stage: &str,
-    cancellation: &Cancellation,
+    context: &Context,
     prompt_for: impl Fn(&str) -> String + Sync,
 ) -> Result<Answers<'a>, Error> {
-    progress(stage);
-    let stage_cancellation = cancellation.child();
+    progress(context, stage);
+    let stage_cancellation = context.cancellation.child();
     thread::scope(|scope| {
         let (sender, answered) = mpsc::channel();
         let threads: Vec<_> = reviewers

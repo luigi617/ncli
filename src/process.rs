@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 pub use cancel::Cancellation;
 
-use crate::error::Error;
+use crate::stderr;
 
-const STDERR_TAIL_LINES: usize = 20;
+const TAIL_LINES: usize = 20;
 // Like Go's exec.Cmd.WaitDelay: once the child exits, a process that escaped it may still hold the
 // pipes open, so they are closed after this long and the output is reported as incomplete.
 const WAIT_DELAY: Duration = Duration::from_secs(1);
@@ -61,7 +61,26 @@ fn detail(stderr_tail: &str) -> String {
     }
 }
 
-pub fn require_executables<'a>(names: impl IntoIterator<Item = &'a OsStr>) -> Result<(), Error> {
+#[derive(Debug, thiserror::Error)]
+#[error("required executables not found on PATH: {}", join_lossy(.0))]
+pub struct MissingExecutables(pub Vec<OsString>);
+
+fn join_lossy(names: &[OsString]) -> String {
+    names
+        .iter()
+        .map(|name| name.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn last_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.trim().lines().collect();
+    lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n")
+}
+
+pub fn require_executables<'a>(
+    names: impl IntoIterator<Item = &'a OsStr>,
+) -> Result<(), MissingExecutables> {
     let mut missing: Vec<OsString> = Vec::new();
     for name in names {
         if !missing.iter().any(|seen| seen == name) && which::which(name).is_err() {
@@ -71,7 +90,7 @@ pub fn require_executables<'a>(names: impl IntoIterator<Item = &'a OsStr>) -> Re
     if missing.is_empty() {
         Ok(())
     } else {
-        Err(Error::MissingExecutables(missing))
+        Err(MissingExecutables(missing))
     }
 }
 
@@ -114,7 +133,7 @@ pub trait Tracer: Send + Sync {
     fn before_call(&self, _call: &Call) {}
     fn after_call(&self, _call: &Call, _outcome: &Outcome) {}
     fn on_error(&self, _call: &Call, _error: &ProcessError) {}
-    fn on_retry(&self, _call: &Call, _error: &ProcessError, _delay: Duration) {}
+    fn on_retry(&self, _call: &Call, _delay: Duration) {}
 }
 
 struct SilentTracer;
@@ -125,12 +144,12 @@ pub struct StderrTracer;
 
 impl StderrTracer {
     fn log(call: &Call, message: &str) {
-        eprintln!(
+        stderr::line(format_args!(
             "ncli: {} (attempt {}/{}) {message}",
             call.name(),
             call.attempt,
             call.attempts
-        );
+        ));
     }
 }
 
@@ -152,7 +171,7 @@ impl Tracer for StderrTracer {
         Self::log(call, &format!("failed: {error}"));
     }
 
-    fn on_retry(&self, call: &Call, _error: &ProcessError, delay: Duration) {
+    fn on_retry(&self, call: &Call, delay: Duration) {
         Self::log(call, &format!("retrying in {}s", delay.as_secs_f64()));
     }
 }
@@ -162,11 +181,10 @@ fn failure(call: &Call, outcome: &Outcome) -> ProcessError {
     if let Some(signal) = sys::signal(outcome.status) {
         return ProcessError::Signal { name, signal };
     }
-    let lines: Vec<&str> = outcome.stderr.trim().lines().collect();
     ProcessError::Exit {
         name,
         code: outcome.returncode(),
-        stderr_tail: lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..].join("\n"),
+        stderr_tail: last_lines(&outcome.stderr),
     }
 }
 
@@ -251,9 +269,11 @@ impl Cli {
             let call = call(attempt);
             match self.attempt(&call, input, cwd, cancellation) {
                 Err(error) if error.is_retryable() && !cancellation.is_cancelled() => {
-                    self.tracer.on_retry(&call, &error, self.retry_delay);
+                    self.tracer.on_retry(&call, self.retry_delay);
                     if cancellation.sleep(self.retry_delay) {
-                        return Err(error);
+                        return Err(ProcessError::Cancelled {
+                            name: call.name().into_owned(),
+                        });
                     }
                 }
                 result => return result,

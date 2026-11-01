@@ -5,6 +5,11 @@ use clap::Subcommand;
 use crate::error::Error;
 use crate::process::Cancellation;
 
+pub struct Context<'a> {
+    pub prog: &'a str,
+    pub cancellation: &'a Cancellation,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     #[command(subcommand)]
@@ -12,9 +17,9 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn run(&self, cancellation: &Cancellation) -> Result<(), Error> {
+    pub fn run(&self, context: &Context) -> Result<(), Error> {
         match self {
-            Self::Code(command) => command.run(cancellation),
+            Self::Code(command) => command.run(context),
         }
     }
 }

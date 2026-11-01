@@ -10,14 +10,17 @@ fn sleep(seconds: &str) {
     thread::sleep(Duration::from_secs(seconds.parse().unwrap()));
 }
 
+fn answer_verdict(dir: &str, verdict: &str, schema: &str) {
+    let mut prompt = String::new();
+    io::stdin().read_to_string(&mut prompt).unwrap();
+    fs::write(Path::new(dir).join("judge.prompt"), prompt).unwrap();
+    fs::write(Path::new(dir).join("judge.schema"), schema).unwrap();
+    print!("{verdict}");
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (args, schema) = match args[..] {
-        [ref rest @ .., "--schema", schema] => (rest, Some(schema.to_owned())),
-        [ref rest @ .., "--schema-file", path] => (rest, Some(fs::read_to_string(path).unwrap())),
-        ref all => (all, None),
-    };
     match args[..] {
         ["describe", arg] => {
             let mut input = String::new();
@@ -96,14 +99,23 @@ fn main() -> ExitCode {
             grandchild.spawn().unwrap();
             print!("done");
         }
-        ["verdict", dir, verdict] => {
-            let mut prompt = String::new();
-            io::stdin().read_to_string(&mut prompt).unwrap();
-            fs::write(Path::new(dir).join("judge.prompt"), prompt).unwrap();
-            fs::write(Path::new(dir).join("judge.schema"), schema.unwrap()).unwrap();
-            print!("{verdict}");
+        ["verdict", dir, verdict, "--schema", schema] => answer_verdict(dir, verdict, schema),
+        ["verdict", dir, verdict, "--schema-file", path] => {
+            answer_verdict(dir, verdict, &fs::read_to_string(path).unwrap());
         }
         ["sleep", seconds] => sleep(seconds),
+        #[cfg(unix)]
+        ["session"] => {
+            let leader = unsafe { libc::getsid(0) == libc::getpid() };
+            print!(
+                "{}",
+                if leader {
+                    "session leader"
+                } else {
+                    "session member"
+                }
+            );
+        }
         ["spawn-and-wait", dir] => {
             Command::new(env::current_exe().unwrap())
                 .args(["outlive", dir])

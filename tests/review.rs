@@ -5,13 +5,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::child;
-use ncli::commands::code::review::{Reviewer, SchemaArg, Verdict, debate};
+use ncli::commands::Context;
+use ncli::commands::code::review::{Reviewer, SchemaArg, Verdict, debate, schema};
 use ncli::error::Error;
 use ncli::process::Cancellation;
 use tempfile::TempDir;
 
 const LINK: &str = "https://github.com/owner/repo/pull/1";
-const SCHEMA: &str = include_str!("../src/commands/code/review/verdict.schema.json");
 const ONE_FINDING: &str = r#"{"change_accessed": true, "findings": [{"severity": "high", "title": "Bug", "file": "a.rs",
     "line": 3, "explanation": "It breaks.", "fix": "Fix it."}]}"#;
 
@@ -37,8 +37,7 @@ fn judge_received(dir: &Path, what: &str) -> String {
 fn assert_judge_received_the_schema(dir: &Path) {
     let received = judge_received(dir, "schema");
     assert!(!received.contains('\n'), "the schema must fit on one line");
-    let parse = |schema: &str| serde_json::from_str::<serde_json::Value>(schema).unwrap();
-    assert_eq!(parse(&received), parse(SCHEMA));
+    assert_eq!(received, schema());
 }
 
 fn reviewers(dir: &Path) -> Vec<Reviewer> {
@@ -66,7 +65,11 @@ fn prompts(dir: &Path, name: &str) -> Vec<String> {
 }
 
 fn run_debate(reviewers: &[Reviewer], judge: &Reviewer) -> Result<Verdict, Error> {
-    debate(LINK, reviewers, judge, &Cancellation::default())
+    let context = Context {
+        prog: "ncli code review",
+        cancellation: &Cancellation::default(),
+    };
+    debate(LINK, reviewers, judge, &context)
 }
 
 #[test]
@@ -130,7 +133,11 @@ fn an_invalid_verdict_is_an_error() {
         SchemaArg::Inline("--schema"),
     );
     let error = run_debate(&reviewers, &judge).unwrap_err();
-    assert!(matches!(error, Error::Verdict(_)), "{error}");
+    assert!(matches!(error, Error::Verdict { .. }), "{error}");
+    assert!(
+        error.to_string().ends_with(": Looks good to me!"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -168,7 +175,7 @@ fn every_call_runs_in_its_own_working_directory() {
 
 #[cfg(unix)]
 mod binary {
-    use std::process::{Command, Output};
+    use std::process::{Command, Output, Stdio};
 
     use super::LINK;
     use crate::common::script;
@@ -179,7 +186,7 @@ mod binary {
 cat > /dev/null
 case "$*" in
 *--output-schema*|*--json-schema*)
-    echo '{"change_accessed": true, "findings": [{"severity": "low", "title": "Typo", "file": "README.md", "line": 1,
+    echo '{"change_accessed": true, "findings": [{"severity": "low", "title": "Typo from '"$(basename "$0")"'", "file": "README.md", "line": 1,
         "explanation": "A word is misspelled.", "fix": "Correct the spelling."}]}' ;;
 *) echo "$(basename "$0") answer" ;;
 esac
@@ -202,20 +209,45 @@ esac
             .unwrap()
     }
 
-    #[test]
-    fn prints_only_the_verdict() {
-        let output = run_ncli(
-            &[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)],
-            &["code", "review", LINK, "--judge", "codex"],
-        );
+    fn verdict_of(args: &[&str]) -> String {
+        let output = run_ncli(&[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)], args);
         assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            "## ncli code review: 1 finding\n\n### 🟡 Low: Typo\n`README.md:1`\n\
-             A word is misspelled.\n**Fix:** Correct the spelling.\n"
-        );
         let err = String::from_utf8(output.stderr).unwrap();
         assert!(err.contains("ncli code review: verdict..."));
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn prints_only_the_verdict_of_the_chosen_judge() {
+        assert_eq!(
+            verdict_of(&["code", "review", LINK, "--judge", "codex"]),
+            "## ncli code review: 1 finding\n\n### 🟡 Low: Typo from codex\n`README.md:1`\n\
+             A word is misspelled.\n**Fix:** Correct the spelling.\n"
+        );
+        assert!(verdict_of(&["code", "review", LINK]).contains("Typo from claude"));
+    }
+
+    #[test]
+    fn a_closed_stderr_does_not_abort_the_review() {
+        let dir = TempDir::new().unwrap();
+        for name in ["claude", "codex"] {
+            script(dir.path(), name, FAKE_REVIEWER);
+        }
+        let mut ncli = Command::new(env!("CARGO_BIN_EXE_ncli"))
+            .args(["code", "review", LINK])
+            .env("PATH", format!("{}:/bin:/usr/bin", dir.path().display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(ncli.stderr.take());
+        let output = ncli.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", output.status);
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("Typo from claude")
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub fn judge(link: &str, debate: &str) -> String {
          survive, as JSON matching the given schema. For each finding, give the file and the most \
          relevant line, a short title, a one or two sentence explanation of what is wrong and why it \
          matters, and a one sentence fix. Report no findings if none survive. Set change_accessed to \
-         false, with no findings, if you could not access the change yourself. Do not modify \
+         false, with no findings, if you or any reviewer could not access the change. Do not modify \
          anything and do not post comments."
     )
 }

@@ -30,7 +30,15 @@ fn version_prints_and_exits_zero() {
 
 #[test]
 fn usage_errors_exit_two() {
-    for args in [&[][..], &["nope"], &["code"], &["code", "review"]] {
+    for args in [
+        &[][..],
+        &["nope"],
+        &["code"],
+        &["code", "review"],
+        &["code", "review", "owner/repo#1"],
+        &["code", "review", "https://"],
+        &["code", "review", "ftp://example.com/pr/1"],
+    ] {
         assert_eq!(
             ncli(args).output().unwrap().status.code(),
             Some(2),

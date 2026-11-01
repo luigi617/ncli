@@ -3,3 +3,4 @@ pub mod commands;
 pub mod error;
 mod interrupt;
 pub mod process;
+mod stderr;

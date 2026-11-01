@@ -8,7 +8,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread::{self, Scope, ScopedJoinHandle};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -23,8 +23,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
-    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, GetCurrentThreadId, INFINITE, OpenThread,
-    ResumeThread, THREAD_SUSPEND_RESUME, THREAD_TERMINATE, WaitForSingleObject,
+    CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, INFINITE, OpenThread, ResumeThread,
+    THREAD_SUSPEND_RESUME, WaitForSingleObject,
 };
 
 use super::{Communicated, WAIT_DELAY};
@@ -37,8 +37,8 @@ pub struct Process {
     child: Child,
     group: Arc<Group>,
     stdin: Option<File>,
-    stdout: File,
-    stderr: File,
+    stdout: Option<File>,
+    stderr: Option<File>,
 }
 
 impl Process {
@@ -66,8 +66,8 @@ impl Process {
             child,
             group,
             stdin,
-            stdout: File::from(stdout),
-            stderr: File::from(stderr),
+            stdout: Some(File::from(stdout)),
+            stderr: Some(File::from(stderr)),
         })
     }
 
@@ -80,41 +80,34 @@ impl Process {
         input: Option<&str>,
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
-        let (stdout, stderr, stdin) = (&mut self.stdout, &mut self.stderr, self.stdin.take());
-        let (child, group) = (&self.child, &*self.group);
-        thread::scope(|scope| {
-            let workers = (|| -> io::Result<_> {
-                let stdout = Worker::spawn(scope, move |stop| read(stdout, stop))?;
-                let stderr = Worker::spawn(scope, move |stop| read(stderr, stop))?;
-                let stdin = stdin
-                    .zip(input)
-                    .map(|(mut stdin, input)| {
-                        Worker::spawn(scope, move |stop| write(&mut stdin, input, stop))
-                    })
-                    .transpose()?;
-                Ok((stdout, stderr, stdin))
-            })();
-            let (stdout, stderr, stdin) = workers.inspect_err(|_| group.kill())?;
-            let timed_out = wait_for_exit(child, timeout).and_then(|exited| {
-                if !exited {
-                    group.kill();
-                    wait_for_exit(child, None)?;
-                }
-                Ok(!exited)
-            });
-            group.kill();
-            let deadline = Instant::now() + WAIT_DELAY;
-            let (stdout, stderr) = (stdout.finish(deadline), stderr.finish(deadline));
-            let fed = stdin.map(|stdin| stdin.finish(deadline)).transpose();
-            let timed_out = timed_out?;
-            let ((stdout, stdout_closed), (stderr, stderr_closed)) = (stdout?, stderr?);
-            fed?;
-            Ok(Communicated {
-                stdout,
-                stderr,
-                timed_out,
-                output_closed: stdout_closed && stderr_closed,
-            })
+        let mut stdout = self.stdout.take().expect("communicate runs once");
+        let mut stderr = self.stderr.take().expect("communicate runs once");
+        let stdout = Worker::spawn(move |stop| read(&mut stdout, stop));
+        let stderr = Worker::spawn(move |stop| read(&mut stderr, stop));
+        let stdin = self.stdin.take().zip(input).map(|(mut stdin, input)| {
+            let input = input.to_owned();
+            Worker::spawn(move |stop| write(&mut stdin, &input, stop))
+        });
+        let timed_out = match wait_for_exit(&self.child, timeout) {
+            Ok(true) => Ok(false),
+            Ok(false) => {
+                self.group.kill();
+                wait_for_exit(&self.child, None).map(|_| true)
+            }
+            Err(error) => Err(error),
+        };
+        self.group.kill();
+        let deadline = Instant::now() + WAIT_DELAY;
+        let (stdout, stderr) = (stdout.finish(deadline), stderr.finish(deadline));
+        let fed = stdin.map(|stdin| stdin.finish(deadline)).transpose();
+        let timed_out = timed_out?;
+        let ((stdout, stdout_closed), (stderr, stderr_closed)) = (stdout?, stderr?);
+        fed?;
+        Ok(Communicated {
+            stdout,
+            stderr,
+            timed_out,
+            output_closed: stdout_closed && stderr_closed,
         })
     }
 
@@ -123,47 +116,23 @@ impl Process {
     }
 }
 
-struct Worker<'scope, T> {
-    thread: ScopedJoinHandle<'scope, Option<io::Result<T>>>,
-    handle: OwnedHandle,
+struct Worker<T> {
+    thread: JoinHandle<io::Result<T>>,
     stop: Arc<AtomicBool>,
     done: mpsc::Receiver<()>,
 }
 
-impl<'scope, T: Send + 'scope> Worker<'scope, T> {
-    fn spawn<'env>(
-        scope: &'scope Scope<'scope, 'env>,
-        work: impl FnOnce(&AtomicBool) -> io::Result<T> + Send + 'scope,
-    ) -> io::Result<Self> {
+impl<T: Send + 'static> Worker<T> {
+    fn spawn(work: impl FnOnce(&AtomicBool) -> io::Result<T> + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let (id_sender, id) = mpsc::channel();
-        let (start, started) = mpsc::channel::<()>();
         let (finished, done) = mpsc::channel();
         let flag = Arc::clone(&stop);
-        let thread = scope.spawn(move || {
-            let _ = id_sender.send(unsafe { GetCurrentThreadId() });
-            started.recv().ok()?;
+        let thread = thread::spawn(move || {
             let result = work(&flag);
             let _ = finished.send(());
-            Some(result)
+            result
         });
-        let id = id.recv().expect("the worker reports its thread id");
-        match owned(unsafe { OpenThread(THREAD_TERMINATE, 0, id) }) {
-            Ok(handle) => {
-                start.send(()).expect("the worker waits to be started");
-                Ok(Self {
-                    thread,
-                    handle,
-                    stop,
-                    done,
-                })
-            }
-            Err(error) => {
-                drop(start);
-                join(thread);
-                Err(error)
-            }
-        }
+        Self { thread, stop, done }
     }
 
     fn finish(self, deadline: Instant) -> io::Result<(T, bool)> {
@@ -174,7 +143,7 @@ impl<'scope, T: Send + 'scope> Worker<'scope, T> {
             // A cancel that lands between two calls is lost, so repeat it until the worker stops.
             loop {
                 unsafe {
-                    CancelSynchronousIo(self.handle.as_raw_handle());
+                    CancelSynchronousIo(self.thread.as_raw_handle());
                 }
                 if self.done.recv_timeout(Duration::from_millis(10))
                     != Err(RecvTimeoutError::Timeout)
@@ -183,7 +152,10 @@ impl<'scope, T: Send + 'scope> Worker<'scope, T> {
                 }
             }
         }
-        let value = join(self.thread).expect("a started worker returns a result")?;
+        let value = self
+            .thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
         Ok((value, finished))
     }
 }
@@ -211,12 +183,6 @@ fn write(pipe: &mut File, input: &str, stop: &AtomicBool) -> io::Result<()> {
         }
         result => result,
     }
-}
-
-fn join<T>(thread: ScopedJoinHandle<'_, T>) -> T {
-    thread
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 fn pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {

@@ -3,7 +3,7 @@
 mod common;
 
 use std::io::Read;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -12,17 +12,48 @@ use std::time::{Duration, Instant};
 use common::script;
 use tempfile::TempDir;
 
-fn review_with(dir: &Path, reviewer: &str) -> Child {
+fn review_command(dir: &Path, reviewer: &str) -> Command {
     for name in ["claude", "codex"] {
         script(dir, name, reviewer);
     }
-    Command::new(env!("CARGO_BIN_EXE_ncli"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ncli"));
+    command
         .args(["code", "review", "https://example.com/pr/1"])
         .env("PATH", format!("{}:/bin:/usr/bin", dir.display()))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
+}
+
+fn review_with(dir: &Path, reviewer: &str) -> Child {
+    review_command(dir, reviewer).spawn().unwrap()
+}
+
+// Each fake reviewer marks that it started, so a signal is only sent once both are running.
+const SLOW_REVIEWER: &str = r#"#!/bin/sh
+touch "$0.started"
+cat > /dev/null
+case "$*" in
+*-schema*) sleep 1; echo '{"change_accessed": true, "findings": []}' ;;
+*) sleep 2; touch "$0.survived"; echo answer ;;
+esac
+"#;
+
+fn wait_until_reviewers_started(dir: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !["claude", "codex"]
+        .iter()
+        .all(|name| dir.join(format!("{name}.started")).exists())
+    {
+        assert!(Instant::now() < deadline, "the reviewers never started");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn reviewer_survived(dir: &Path) -> bool {
+    ["claude", "codex"]
+        .iter()
+        .any(|name| dir.join(format!("{name}.survived")).exists())
 }
 
 fn exit_within(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
@@ -47,15 +78,31 @@ fn signal(child: &Child, signal: libc::c_int) {
 
 fn signal_kills_reviewers(signal_number: libc::c_int) {
     let dir = TempDir::new().unwrap();
-    let survived = dir.path().join("survived");
-    let reviewer = format!("#!/bin/sh\nsleep 2\ntouch '{}'\n", survived.display());
-    let mut ncli = review_with(dir.path(), &reviewer);
-    thread::sleep(Duration::from_millis(500));
+    let mut ncli = review_with(dir.path(), SLOW_REVIEWER);
+    wait_until_reviewers_started(dir.path());
     signal(&ncli, signal_number);
     let status = exit_within(&mut ncli, Duration::from_secs(5));
     assert_eq!(status.signal(), Some(signal_number), "{status}");
     thread::sleep(Duration::from_secs(3));
-    assert!(!survived.exists(), "a reviewer outlived ncli");
+    assert!(!reviewer_survived(dir.path()), "a reviewer outlived ncli");
+}
+
+#[test]
+fn a_signal_ignored_by_the_parent_stays_ignored() {
+    let dir = TempDir::new().unwrap();
+    let mut command = review_command(dir.path(), SLOW_REVIEWER);
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let mut ncli = command.spawn().unwrap();
+    wait_until_reviewers_started(dir.path());
+    signal(&ncli, libc::SIGHUP);
+    let status = exit_within(&mut ncli, Duration::from_secs(15));
+    assert!(status.success(), "{status}");
+    assert!(reviewer_survived(dir.path()));
 }
 
 #[test]

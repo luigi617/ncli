@@ -1,16 +1,18 @@
-use std::ffi::OsString;
 use std::io;
 
-use crate::process::ProcessError;
+use crate::process::{MissingExecutables, ProcessError, last_lines};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("required executables not found on PATH: {}", join_lossy(.0))]
-    MissingExecutables(Vec<OsString>),
+    #[error(transparent)]
+    MissingExecutables(#[from] MissingExecutables),
     #[error("could not prepare a working directory: {0}")]
     WorkingDirectory(#[source] io::Error),
-    #[error("the judge returned an invalid verdict: {0}")]
-    Verdict(#[source] serde_json::Error),
+    #[error("the judge returned an invalid verdict ({source}): {}", last_lines(.output))]
+    Verdict {
+        source: serde_json::Error,
+        output: String,
+    },
     #[error("the judge could not access the change at {0}")]
     ChangeUnavailable(String),
     #[error("could not write the output: {0}")]
@@ -29,19 +31,11 @@ impl Error {
         match self {
             Self::MissingExecutables(_) => Self::MISSING_EXECUTABLE,
             Self::WorkingDirectory(_)
-            | Self::Verdict(_)
+            | Self::Verdict { .. }
             | Self::ChangeUnavailable(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)
             | Self::Process(_) => Self::FAILURE,
         }
     }
-}
-
-fn join_lossy(names: &[OsString]) -> String {
-    names
-        .iter()
-        .map(|name| name.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(", ")
 }

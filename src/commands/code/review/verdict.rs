@@ -4,8 +4,6 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-use super::COMMAND;
-
 // Kept on one line: Windows cannot pass an argument containing a newline to a batch-file shim.
 static SCHEMA: LazyLock<String> = LazyLock::new(|| {
     serde_json::from_str::<serde_json::Value>(include_str!("verdict.schema.json"))
@@ -51,14 +49,21 @@ impl Verdict {
     }
 }
 
-impl fmt::Display for Verdict {
+pub struct Report<'a> {
+    pub prog: &'a str,
+    pub verdict: &'a Verdict,
+}
+
+impl fmt::Display for Report<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.findings.len() {
-            0 => return write!(f, "## {COMMAND}: no findings"),
-            1 => write!(f, "## {COMMAND}: 1 finding")?,
-            count => write!(f, "## {COMMAND}: {count} findings")?,
+        let prog = self.prog;
+        let findings = &self.verdict.findings;
+        match findings.len() {
+            0 => return write!(f, "## {prog}: no findings"),
+            1 => write!(f, "## {prog}: 1 finding")?,
+            count => write!(f, "## {prog}: {count} findings")?,
         }
-        for finding in &self.findings {
+        for finding in findings {
             write!(f, "\n\n{finding}")?;
         }
         Ok(())
@@ -74,8 +79,8 @@ impl fmt::Display for Finding {
             self.severity,
             one_line(&self.title),
             code_span(&location),
-            self.explanation.trim(),
-            self.fix.trim()
+            one_line(&self.explanation),
+            one_line(&self.fix)
         )
     }
 }

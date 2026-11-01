@@ -43,7 +43,7 @@ impl Tracer for RecordingTracer {
         self.record("error".into(), call);
     }
 
-    fn on_retry(&self, call: &Call, _error: &ProcessError, delay: Duration) {
+    fn on_retry(&self, call: &Call, delay: Duration) {
         self.record(format!("retry:{}", delay.as_secs_f64()), call);
     }
 }

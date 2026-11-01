@@ -2,8 +2,8 @@ pub mod review;
 
 use clap::Subcommand;
 
+use super::Context;
 use crate::error::Error;
-use crate::process::Cancellation;
 
 /// Work with code changes.
 #[derive(Debug, Subcommand)]
@@ -12,9 +12,9 @@ pub enum CodeCommand {
 }
 
 impl CodeCommand {
-    pub fn run(&self, cancellation: &Cancellation) -> Result<(), Error> {
+    pub fn run(&self, context: &Context) -> Result<(), Error> {
         match self {
-            Self::Review(review) => review.run(cancellation),
+            Self::Review(review) => review.run(context),
         }
     }
 }

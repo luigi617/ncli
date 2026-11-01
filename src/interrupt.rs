@@ -19,8 +19,12 @@ mod unix {
 
     static RECEIVED: AtomicI32 = AtomicI32::new(SIGINT);
 
+    // A signal the parent ignores (nohup, background jobs) stays ignored, as in any shell tool.
     pub fn install() -> io::Result<()> {
-        let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
+        let watched = [SIGINT, SIGTERM, SIGHUP]
+            .into_iter()
+            .filter(|&signal| !ignored(signal));
+        let mut signals = Signals::new(watched)?;
         thread::spawn(move || {
             for signal in signals.forever() {
                 RECEIVED.store(signal, Ordering::SeqCst);
@@ -34,6 +38,12 @@ mod unix {
     // command was interrupted, so that a loop running it stops too.
     pub fn exit() -> ! {
         terminate(RECEIVED.load(Ordering::SeqCst))
+    }
+
+    fn ignored(signal: i32) -> bool {
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        let found = unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) } == 0;
+        found && current.sa_sigaction == libc::SIG_IGN
     }
 
     fn terminate(signal: i32) -> ! {

@@ -22,8 +22,17 @@ impl Process {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+            .stderr(Stdio::piped());
+        // A new session detaches the child from ncli's terminal, so a terminal prompt fails
+        // instead of stopping the child until the timeout.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let child = command.spawn()?;
         let group = Arc::new(Group::new(&child)?);
         Ok(Self { child, group })
@@ -38,7 +47,33 @@ impl Process {
         input: Option<&str>,
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
-        communicate(&mut self.child, &self.group, input, timeout)
+        let group = &*self.group;
+        let mut pipes = Pipes::new(&mut self.child, input.unwrap_or_default().as_bytes())
+            .inspect_err(|_| group.kill())?;
+        let (exit_reader, exit_writer) = io::pipe().inspect_err(|_| group.kill())?;
+        let child = &self.child;
+        thread::scope(|scope| {
+            let waiter = scope.spawn(move || {
+                let result = wait_for_exit(child);
+                drop(exit_writer);
+                result
+            });
+            let pumped = pipes.pump(&exit_reader, group, timeout);
+            if pumped.is_err() {
+                group.kill();
+            }
+            let waited = waiter
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            let (timed_out, output_closed) = pumped?;
+            waited?;
+            Ok(Communicated {
+                stdout: pipes.stdout.output,
+                stderr: pipes.stderr.output,
+                timed_out,
+                output_closed,
+            })
+        })
     }
 
     pub fn wait(mut self) -> io::Result<ExitStatus> {
@@ -82,40 +117,6 @@ fn wait_for_exit(child: &Child) -> io::Result<()> {
             return Err(error);
         }
     }
-}
-
-fn communicate(
-    child: &mut Child,
-    group: &Group,
-    input: Option<&str>,
-    timeout: Option<Duration>,
-) -> io::Result<Communicated> {
-    let setup = Pipes::new(child, input.unwrap_or_default().as_bytes())
-        .and_then(|pipes| Ok((pipes, io::pipe()?)));
-    let (mut pipes, (exit_reader, exit_writer)) = setup.inspect_err(|_| group.kill())?;
-    let child = &*child;
-    thread::scope(|scope| {
-        let waiter = scope.spawn(move || {
-            let result = wait_for_exit(child);
-            drop(exit_writer);
-            result
-        });
-        let pumped = pipes.pump(&exit_reader, group, timeout);
-        if pumped.is_err() {
-            group.kill();
-        }
-        let waited = waiter
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        let (timed_out, output_closed) = pumped?;
-        waited?;
-        Ok(Communicated {
-            stdout: pipes.stdout.output,
-            stderr: pipes.stderr.output,
-            timed_out,
-            output_closed,
-        })
-    })
 }
 
 struct Output<P> {

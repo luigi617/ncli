@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::{Grandchild, RecordingTracer, child, child_name, events, flaky};
-use ncli::process::{Cancellation, Cli, ProcessError};
+use ncli::process::{Call, Cancellation, Cli, ProcessError, Tracer};
 use tempfile::TempDir;
 
 #[test]
@@ -273,14 +273,6 @@ fn nothing_escapes_the_job() {
     assert!(out.contains("done"), "{out}");
 }
 
-fn cancel_after(cancellation: &Cancellation, delay: Duration) {
-    let cancellation = cancellation.clone();
-    thread::spawn(move || {
-        thread::sleep(delay);
-        cancellation.cancel();
-    });
-}
-
 #[test]
 fn cancel_kills_running_calls_without_retrying() {
     let cancellation = Cancellation::default();
@@ -315,26 +307,37 @@ fn calls_started_after_cancel_are_killed_immediately() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
+struct CancelOnRetry(Cancellation);
+
+impl Tracer for CancelOnRetry {
+    fn on_retry(&self, _call: &Call, _delay: Duration) {
+        self.0.cancel();
+    }
+}
+
 #[test]
 fn cancel_stops_pending_retries() {
     let dir = TempDir::new().unwrap();
     let cancellation = Cancellation::default();
-    let tracer = RecordingTracer::default();
-    let cli = flaky(dir.path(), 1)
+    let started = Instant::now();
+    let error = flaky(dir.path(), 1)
         .attempts(3)
         .retry_delay(Duration::from_secs(30))
-        .tracer(tracer.clone());
-    cancel_after(&cancellation, Duration::from_millis(500));
-    let started = Instant::now();
-    let error = cli.run(&[], None, None, &cancellation).unwrap_err();
-    assert!(error.to_string().contains("transient"));
+        .tracer(CancelOnRetry(cancellation.clone()))
+        .run(&[], None, None, &cancellation)
+        .unwrap_err();
+    assert!(matches!(error, ProcessError::Cancelled { .. }), "{error}");
     assert!(started.elapsed() < Duration::from_secs(5));
-    let kinds: Vec<_> = tracer
-        .events()
-        .into_iter()
-        .map(|(event, _)| event)
-        .collect();
-    assert_eq!(kinds, ["before", "after:1", "error", "retry:30"]);
+    assert_eq!(fs::read_to_string(dir.path().join("count")).unwrap(), "1");
+}
+
+#[cfg(unix)]
+#[test]
+fn children_run_detached_from_the_terminal() {
+    let out = child(&["session"])
+        .run(&[], None, None, &Cancellation::default())
+        .unwrap();
+    assert_eq!(out, "session leader");
 }
 
 #[test]

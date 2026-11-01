@@ -1,4 +1,12 @@
-use ncli::commands::code::review::Verdict;
+use ncli::commands::code::review::{Report, Verdict};
+
+fn render(verdict: &Verdict) -> String {
+    Report {
+        prog: "ncli code review",
+        verdict,
+    }
+    .to_string()
+}
 
 const VERDICT: &str = r#"{"change_accessed": true, "findings": [
     {"severity": "low", "title": "Hard-coded tool name", "file": "src/reviewers.rs", "line": 23,
@@ -11,7 +19,7 @@ const VERDICT: &str = r#"{"change_accessed": true, "findings": [
 fn findings_render_most_severe_first_as_markdown() {
     let verdict = Verdict::parse(VERDICT).unwrap();
     assert_eq!(
-        verdict.to_string(),
+        render(&verdict),
         "## ncli code review: 2 findings\n\
          \n\
          ### 🔴 High: Timeout ignored\n\
@@ -29,13 +37,11 @@ fn findings_render_most_severe_first_as_markdown() {
 #[test]
 fn counts_are_worded_for_people() {
     let none = Verdict::parse(r#"{"change_accessed": true, "findings": []}"#).unwrap();
-    assert_eq!(none.to_string(), "## ncli code review: no findings");
+    assert_eq!(render(&none), "## ncli code review: no findings");
     let single = r#"{"change_accessed": true, "findings": [{"severity": "medium", "title": "t", "file": "f", "line": 1,
         "explanation": "e", "fix": "x"}]}"#;
     assert!(
-        Verdict::parse(single)
-            .unwrap()
-            .to_string()
+        render(&Verdict::parse(single).unwrap())
             .starts_with("## ncli code review: 1 finding\n\n### 🟠 Medium: t")
     );
 }
@@ -67,12 +73,12 @@ fn model_text_cannot_break_the_markdown_structure() {
     let verdict = Verdict::parse(
         r#"{"change_accessed": true, "findings": [{"severity": "low",
             "title": "Broken\n# heading", "file": "src/`odd`\nname.rs", "line": 2,
-            "explanation": "e", "fix": "x"}]}"#,
+            "explanation": "e\n\n### 🔴 High: fake", "fix": "x\ny"}]}"#,
     )
     .unwrap();
     assert_eq!(
-        verdict.to_string(),
-        "## ncli code review: 1 finding\n\n### 🟡 Low: Broken # heading\n``src/`odd` name.rs:2``\ne\n**Fix:** x"
+        render(&verdict),
+        "## ncli code review: 1 finding\n\n### 🟡 Low: Broken # heading\n``src/`odd` name.rs:2``\ne ### 🔴 High: fake\n**Fix:** x y"
     );
 }
 
@@ -83,5 +89,5 @@ fn a_location_starting_with_a_backtick_is_padded() {
             "file": "`f", "line": 1, "explanation": "e", "fix": "x"}]}"#,
     )
     .unwrap();
-    assert!(verdict.to_string().contains("\n`` `f:1 ``\n"));
+    assert!(render(&verdict).contains("\n`` `f:1 ``\n"));
 }

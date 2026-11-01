@@ -5,9 +5,9 @@ use std::fs;
 
 use common::path_with;
 use ncli::error::Error;
-use ncli::process::require_executables;
+use ncli::process::{MissingExecutables, require_executables};
 
-fn require(names: &[&str]) -> Result<(), Error> {
+fn require(names: &[&str]) -> Result<(), MissingExecutables> {
     require_executables(names.iter().map(OsStr::new))
 }
 
@@ -15,11 +15,11 @@ fn require(names: &[&str]) -> Result<(), Error> {
 fn require_executables_reports_every_missing_name_once_in_order() {
     let _path = path_with(&["claude"]);
     let error = require(&["gemini", "claude", "codex", "gemini"]).unwrap_err();
-    assert_eq!(error.exit_code(), Error::MISSING_EXECUTABLE);
     assert_eq!(
         error.to_string(),
         "required executables not found on PATH: gemini, codex"
     );
+    assert_eq!(Error::from(error).exit_code(), Error::MISSING_EXECUTABLE);
 }
 
 #[test]
