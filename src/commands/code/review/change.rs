@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use crate::process::{self, Cancellation, Cli, ProcessError};
 
-const PREFERRED_REMOTE: &str = "origin";
+pub const PREFERRED_REMOTE: &str = "origin";
+const REMOTES: &str = "refs/remotes/";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,14 +23,26 @@ pub enum Change {
     },
     Branch {
         repo: PathBuf,
-        base: String,
+        base: RemoteBranch,
         merge_base: String,
         head: String,
     },
 }
 
+// Kept as the full ref, since a local branch can share a remote branch's short name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RemoteBranch(String);
+
+impl fmt::Display for RemoteBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.strip_prefix(REMOTES).unwrap_or(&self.0))
+    }
+}
+
 struct Git<'a> {
     cli: Cli,
+    cwd: Option<&'a Path>,
     cancellation: &'a Cancellation,
 }
 
@@ -40,7 +53,7 @@ impl Git<'_> {
 
     fn run_with_input(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, ProcessError> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-        let output = self.cli.run(&args, input, None, self.cancellation)?;
+        let output = self.cli.run(&args, input, self.cwd, self.cancellation)?;
         Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
     }
 
@@ -61,14 +74,63 @@ impl Git<'_> {
             .tempdir()
             .map_err(Error::Snapshot)?;
         let index = dir.path().join("index");
-        let real_index = PathBuf::from(self.run(&["rev-parse", "--git-path", "index"])?);
+        let real_index = self.run(&["rev-parse", "--git-path", "index"])?;
+        let real_index = self.cwd.unwrap_or(Path::new("")).join(real_index);
         copy_index(&real_index, &index).map_err(Error::Snapshot)?;
         let git = Git {
             cli: Cli::new(["git"]).env("GIT_INDEX_FILE", &index),
-            cancellation: self.cancellation,
+            ..*self
         };
+        let hidden = git.hidden_edits()?;
+        if !hidden.is_empty() {
+            return Err(Error::HiddenEdits(hidden.join(", ")));
+        }
+        let tracked = git.gitlinks()?;
         git.run(&["add", "--all"])?;
+        let nested: Vec<String> = git
+            .gitlinks()?
+            .into_iter()
+            .filter(|path| !tracked.contains(path))
+            .collect();
+        if !nested.is_empty() {
+            return Err(Error::NestedRepositories(nested.join(", ")));
+        }
         Ok(git.run(&["write-tree"])?)
+    }
+
+    // Clears the assume-unchanged bits, so it must only run on a copy of the index.
+    fn hidden_edits(&self) -> Result<Vec<String>, ProcessError> {
+        let files = self.run(&["ls-files", "-v", "-z"])?;
+        let assumed: Vec<&str> = files
+            .split('\0')
+            .filter_map(|entry| entry.split_once(' '))
+            .filter(|(tag, _)| tag.bytes().all(|byte| byte.is_ascii_lowercase()))
+            .map(|(_, path)| path)
+            .collect();
+        if assumed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let paths: String = assumed.iter().map(|path| format!("{path}\0")).collect();
+        self.run_with_input(
+            &["update-index", "--no-assume-unchanged", "-z", "--stdin"],
+            Some(paths.as_bytes()),
+        )?;
+        let modified = self.run(&["diff", "--name-only", "-z"])?;
+        Ok(modified
+            .split('\0')
+            .filter(|path| assumed.contains(path))
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn gitlinks(&self) -> Result<Vec<String>, ProcessError> {
+        let entries = self.run(&["ls-files", "--stage", "-z"])?;
+        Ok(entries
+            .split('\0')
+            .filter_map(|entry| entry.strip_prefix("160000 "))
+            .filter_map(|entry| entry.split_once('\t'))
+            .map(|(_, path)| path.to_owned())
+            .collect())
     }
 
     fn dirty_submodules(&self) -> Result<Vec<String>, ProcessError> {
@@ -77,6 +139,7 @@ impl Git<'_> {
             "status",
             "--porcelain=v2",
             "-z",
+            "--untracked-files=no",
             "--ignore-submodules=none",
         ])?;
         let mut entries = status.split('\0');
@@ -100,22 +163,34 @@ impl Git<'_> {
         Ok(dirty)
     }
 
-    fn default_branch(&self) -> Result<String, Error> {
+    fn default_branch(&self) -> Result<RemoteBranch, Error> {
         let output = self.run(&[
             "for-each-ref",
-            "--format=%(symref:short)",
-            "refs/remotes/*/HEAD",
+            "--format=%(symref)",
+            &format!("{REMOTES}*/HEAD"),
         ])?;
-        let branches: Vec<&str> = output.lines().filter(|line| !line.is_empty()).collect();
-        let preferred = format!("{PREFERRED_REMOTE}/");
-        match branches[..] {
-            [] => Err(Error::NoDefaultBranch),
-            [branch] => Ok(branch.to_owned()),
-            _ => branches
+        let mut branches: Vec<RemoteBranch> = output
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| RemoteBranch(line.to_owned()))
+            .collect();
+        let preferred = format!("{REMOTES}{PREFERRED_REMOTE}/");
+        match branches.len() {
+            0 => Err(Error::NoDefaultBranch),
+            1 => Ok(branches.remove(0)),
+            _ => match branches
                 .iter()
-                .find(|branch| branch.starts_with(&preferred))
-                .map(|&branch| branch.to_owned())
-                .ok_or_else(|| Error::AmbiguousDefaultBranch(branches.join(", "))),
+                .position(|branch| branch.0.starts_with(&preferred))
+            {
+                Some(index) => Ok(branches.swap_remove(index)),
+                None => Err(Error::AmbiguousDefaultBranch(
+                    branches
+                        .iter()
+                        .map(RemoteBranch::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )),
+            },
         }
     }
 }
@@ -137,12 +212,17 @@ impl Change {
     pub fn local(cancellation: &Cancellation) -> Result<Self, Error> {
         let git = Git {
             cli: Cli::new(["git"]),
+            cwd: None,
             cancellation,
         };
         process::require_executables([git.cli.executable()])?;
         let repo = match git.run(&["rev-parse", "--show-toplevel"]) {
             Err(error @ ProcessError::Exit { .. }) => return Err(Error::NotAWorkTree(error)),
             repo => PathBuf::from(repo?),
+        };
+        let git = Git {
+            cwd: Some(&repo),
+            ..git
         };
         let head = git.head()?;
         let base = match &head {
@@ -168,7 +248,7 @@ impl Change {
             return Err(Error::NoCommits(repo));
         };
         let base = git.default_branch()?;
-        let merge_base = match git.run(&["merge-base", &base, &head]) {
+        let merge_base = match git.run(&["merge-base", &base.0, &head]) {
             Err(ProcessError::Exit { code: 1, .. }) => {
                 return Err(Error::NoCommonHistory { repo, base });
             }

@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::review::Change;
+use crate::commands::code::review::{Change, PREFERRED_REMOTE, RemoteBranch};
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
 
@@ -32,7 +32,7 @@ pub enum Error {
     )]
     NoDefaultBranch,
     #[error(
-        "the repository has several default branches to compare the current branch with ({0}) and none on origin"
+        "the repository has several default branches to compare the current branch with ({0}) and none on {PREFERRED_REMOTE}"
     )]
     AmbiguousDefaultBranch(String),
     #[error("there is nothing to review in {}: no commits and no uncommitted changes", .0.display())]
@@ -46,15 +46,23 @@ pub enum Error {
     #[error(
         "there is nothing to review in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
     )]
-    NoChanges { repo: PathBuf, base: String },
+    NoChanges { repo: PathBuf, base: RemoteBranch },
     #[error(
         "the current branch in {} has no history in common with {base}", .repo.display()
     )]
-    NoCommonHistory { repo: PathBuf, base: String },
+    NoCommonHistory { repo: PathBuf, base: RemoteBranch },
     #[error(
         "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
+    #[error(
+        "files marked assume-unchanged have edits the review would miss ({0}); commit or revert them, or clear the mark with `git update-index --no-assume-unchanged`"
+    )]
+    HiddenEdits(String),
+    #[error(
+        "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
+    )]
+    NestedRepositories(String),
     #[error("the task is empty")]
     EmptyTask,
     #[error(
@@ -123,6 +131,8 @@ impl Error {
             | Self::NoChanges { .. }
             | Self::NoCommonHistory { .. }
             | Self::DirtySubmodules { .. }
+            | Self::HiddenEdits(_)
+            | Self::NestedRepositories(_)
             | Self::NoOutput
             | Self::NoReview
             | Self::NothingToPublish(_)

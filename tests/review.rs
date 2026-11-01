@@ -639,6 +639,62 @@ esac
     }
 
     #[test]
+    fn a_local_branch_named_like_the_default_branch_does_not_replace_it() {
+        let repo = repo();
+        let (merge_base, head) = feature_branch(repo.path());
+        set_default_branch(repo.path(), "upstream");
+        git(repo.path(), &["branch", "origin/main", &head]);
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains(&format!("about the commits from origin/main to {head} in ")),
+            "{prompt}"
+        );
+        assert!(prompt.contains(&format!("`git log {merge_base}..{head}`")));
+    }
+
+    #[test]
+    fn edits_to_files_marked_assume_unchanged_are_rejected() {
+        let repo = repo();
+        git(
+            repo.path(),
+            &["update-index", "--assume-unchanged", "README.md"],
+        );
+        fs::write(repo.path().join("README.md"), "secret\n").unwrap();
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: files marked assume-unchanged have edits the review \
+                 would miss (README.md)"
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            git(repo.path(), &["ls-files", "-v", "README.md"]),
+            "h README.md",
+            "the real index lost its assume-unchanged mark"
+        );
+    }
+
+    #[test]
+    fn untracked_nested_repositories_are_rejected() {
+        let repo = repo();
+        let nested = repo.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        git(&nested, &["init", "--quiet"]);
+        fs::write(nested.join("a.rs"), "fn main() {}\n").unwrap();
+        git(&nested, &["add", "a.rs"]);
+        git(&nested, &["commit", "--quiet", "--message", "Nested."]);
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: untracked git repositories cannot be reviewed (nested); \
+                 ignore them or add them as submodules"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_local_review_has_nowhere_to_publish_comments() {
         let repo = repo();
         fs::write(repo.path().join("README.md"), "changed\n").unwrap();
