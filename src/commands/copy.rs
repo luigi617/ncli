@@ -55,14 +55,10 @@ impl Clipboard {
     }
 }
 
-// clip reads UTF-16 when the input starts with a byte order mark, and the console code page
-// otherwise.
+// clip reads its input as UTF-16 when it detects it, and in the console code page otherwise.
 #[cfg(windows)]
 fn encode(text: &str) -> Vec<u8> {
-    std::iter::once('\u{feff}' as u16)
-        .chain(text.encode_utf16())
-        .flat_map(u16::to_le_bytes)
-        .collect()
+    text.encode_utf16().flat_map(u16::to_le_bytes).collect()
 }
 
 #[cfg(not(windows))]

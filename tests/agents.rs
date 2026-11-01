@@ -576,6 +576,7 @@ esac
             r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/aliased""#.to_owned(),
             "sh -c 'echo early; (sleep 3; echo late) &'".to_owned(),
             format!(r#"{ncli} copy 2> "$NCLI_TEST_LOG/still""#),
+            r#"{ ls -la "$NCLI_STATE_DIR"; cat "$NCLI_STATE_DIR/recording.txt"; } > "$NCLI_TEST_LOG/listing" 2>&1"#.to_owned(),
             "sleep 3".to_owned(),
             format!("{ncli} copy"),
             r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/late""#.to_owned(),
@@ -584,7 +585,9 @@ esac
             "exit".to_owned(),
         ];
         let mut zsh = Command::new("script")
-            .args(["-q", "/dev/null", "zsh", "-f", "-i"])
+            .args(["-q"])
+            .arg(env.log.path().join("session"))
+            .args(["zsh", "-f", "-i"])
             .current_dir(env.work.path())
             .env(
                 "PATH",
@@ -606,7 +609,10 @@ esac
         assert_eq!(env.logged("first").unwrap(), "hello\nred\n");
         assert_eq!(
             env.logged("still").unwrap().trim(),
-            "ncli copy: error: the output of the last command is still being recorded"
+            "ncli copy: error: the output of the last command is still being recorded",
+            "state:\n{}\nsession:\n{}",
+            env.logged("listing").unwrap_or_default(),
+            String::from_utf8_lossy(&fs::read(env.log.path().join("session")).unwrap_or_default())
         );
         assert_eq!(env.logged("aliased").unwrap(), "aliased\n");
         assert_eq!(env.logged("late").unwrap(), "early\nlate\n");
