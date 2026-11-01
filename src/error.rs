@@ -30,8 +30,8 @@ pub enum Error {
     ChangeUnavailable(String),
     #[error("the task is empty")]
     EmptyTask,
-    #[error("there is no output to copy")]
-    NothingToCopy,
+    #[error("there is no last output")]
+    NoOutput,
     #[error("there is no review to publish; run `ncli code review` first")]
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
@@ -72,7 +72,7 @@ impl Error {
             | Self::NoSession(_)
             | Self::Incomplete { .. }
             | Self::ChangeUnavailable(_)
-            | Self::NothingToCopy
+            | Self::NoOutput
             | Self::NoReview
             | Self::NothingToPublish(_)
             | Self::ClipboardUnsupported

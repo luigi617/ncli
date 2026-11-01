@@ -1,7 +1,7 @@
 use crate::commands::Context;
 use crate::error::Error;
 use crate::process::{self, Cli};
-use crate::state::{self, Entry};
+use crate::state;
 
 #[cfg(target_os = "macos")]
 const CLIPBOARD: Option<&[&str]> = Some(&["pbcopy"]);
@@ -16,11 +16,7 @@ pub fn run(context: &Context) -> Result<(), Error> {
             .copied(),
     );
     process::require_executables([clipboard.executable()])?;
-    let output = state::latest(&[Entry::Output, Entry::Terminal])?.unwrap_or_default();
-    let output = String::from_utf8_lossy(&strip_ansi_escapes::strip(output)).into_owned();
-    if output.trim().is_empty() {
-        return Err(Error::NothingToCopy);
-    }
+    let output = state::last_output()?;
     clipboard.run(&[], Some(&output), None, context.cancellation)?;
     Ok(())
 }

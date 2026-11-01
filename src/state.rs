@@ -67,7 +67,16 @@ pub fn load(entry: Entry) -> Result<Option<Vec<u8>>, Error> {
     found(entry, fs::read(dir()?.join(entry.file_name())))
 }
 
-pub fn latest(entries: &[Entry]) -> Result<Option<Vec<u8>>, Error> {
+pub fn last_output() -> Result<String, Error> {
+    let output = latest(&[Entry::Output, Entry::Terminal])?.unwrap_or_default();
+    let output = String::from_utf8_lossy(&strip_ansi_escapes::strip(output)).into_owned();
+    if output.trim().is_empty() {
+        return Err(Error::NoOutput);
+    }
+    Ok(output)
+}
+
+fn latest(entries: &[Entry]) -> Result<Option<Vec<u8>>, Error> {
     let mut newest: Option<(SystemTime, Entry)> = None;
     for &entry in entries {
         let modified =

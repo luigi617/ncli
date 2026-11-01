@@ -283,6 +283,37 @@ esac
     }
 
     #[test]
+    fn address_comment_without_a_link_addresses_the_last_output() {
+        let env = Env::new(&["claude", "codex"]);
+        let output = env.run(&["code", "address-comment"]);
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert_eq!(
+            stderr(&output).trim(),
+            "ncli code address-comment: error: there is no last output"
+        );
+        assert!(env.logged("claude.prompt").is_none());
+
+        let review = env.succeed(&["code", "review", LINK]);
+        assert_eq!(env.succeed(&["code", "address-comment"]), "claude did it\n");
+        let prompt = env.logged("claude.prompt").unwrap();
+        assert!(prompt.contains(&format!("<output>\n{}</output>", review)));
+        assert!(prompt.contains("Do not commit, do not push"));
+
+        let unrelated = env
+            .ncli(&["code", "address-comment"])
+            .env("FAKE_COMPLETED", "false")
+            .output()
+            .unwrap();
+        assert_eq!(unrelated.status.code(), Some(Error::FAILURE.into()));
+        assert!(
+            stderr(&unrelated)
+                .contains("ncli code address-comment: error: claude could not finish the task: "),
+            "{}",
+            stderr(&unrelated)
+        );
+    }
+
+    #[test]
     fn publish_comment_posts_the_findings_of_the_last_review() {
         let env = Env::new(&["claude", "codex"]);
         let output = env.run(&["code", "publish-comment"]);
@@ -336,7 +367,7 @@ esac
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert_eq!(
             stderr(&output).trim(),
-            "ncli copy: error: there is no output to copy"
+            "ncli copy: error: there is no last output"
         );
 
         let printed = env.succeed(&["fix the bug"]);

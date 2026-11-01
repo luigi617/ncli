@@ -35,7 +35,6 @@ fn usage_errors_exit_two() {
         &["--nope"],
         &["code"],
         &["code", "nope"],
-        &["code", "address-comment"],
         &["code", "address-comment", "owner/repo#1"],
         &["code", "review"],
         &["code", "review", "owner/repo#1"],
