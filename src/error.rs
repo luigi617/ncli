@@ -1,7 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::review::{Change, RemoteBranch};
+use crate::commands::code::review::{Change, Head, RemoteBranch};
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
 
@@ -40,10 +40,12 @@ pub enum Error {
     },
     #[error("there is nothing to review in {}: no commits and no uncommitted changes", .0.display())]
     NoCommits(PathBuf),
+    #[error("the current directory is not in a git work tree: {0}")]
+    NotAWorkTree(#[source] ProcessError),
     #[error(
         "could not find a git work tree to review the local changes of; give a link instead: {0}"
     )]
-    NotAWorkTree(#[source] ProcessError),
+    NoLocalChange(#[source] ProcessError),
     #[error("could not snapshot the uncommitted changes: {0}")]
     Snapshot(#[source] io::Error),
     #[error(
@@ -70,6 +72,25 @@ pub enum Error {
         "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
     )]
     UndoneStagedChanges(String),
+    #[error("{agent} left no changes in {} to review: {}", .repo.display(), .report.trim())]
+    NothingImplemented {
+        agent: String,
+        repo: PathBuf,
+        report: String,
+    },
+    #[error(
+        "HEAD in {} moved from {from} to {to} during the run; agents must not commit or switch branches, so the changes were not reviewed",
+        .repo.display()
+    )]
+    HeadMoved {
+        repo: PathBuf,
+        from: Box<Head>,
+        to: Box<Head>,
+    },
+    #[error(
+        "the review still has findings after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
+    )]
+    Unsettled { rounds: u32, report: String },
     #[error("the task is empty")]
     EmptyTask,
     #[error(
@@ -135,12 +156,16 @@ impl Error {
             | Self::AmbiguousDefaultBranch { .. }
             | Self::NoCommits(_)
             | Self::NotAWorkTree(_)
+            | Self::NoLocalChange(_)
             | Self::NoChanges { .. }
             | Self::NoCommonHistory { .. }
             | Self::DirtySubmodules { .. }
             | Self::HiddenEdits(_)
             | Self::NestedRepositories(_)
             | Self::UndoneStagedChanges(_)
+            | Self::NothingImplemented { .. }
+            | Self::HeadMoved { .. }
+            | Self::Unsettled { .. }
             | Self::NoOutput
             | Self::NoReview
             | Self::NothingToPublish(_)

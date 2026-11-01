@@ -72,7 +72,13 @@ fn run_debate(reviewers: &[Agent], judge: &Agent) -> Result<Verdict, Error> {
         prog: "ncli code review",
         cancellation: &Cancellation::default(),
     };
-    debate(&Change::Link(LINK.to_owned()), reviewers, judge, &context)
+    debate(
+        &Change::Link(LINK.to_owned()),
+        None,
+        reviewers,
+        judge,
+        &context,
+    )
 }
 
 #[test]
@@ -105,6 +111,9 @@ fn reviewers_review_rebut_and_judge() {
         assert!(verdict_prompt.contains(&format!("## Rebuttal: {name}\n\n{name} answer 1")));
     }
     assert_eq!(prompts(dir.path(), "c").len(), 2);
+    for prompt in [review, rebuttal, &verdict_prompt] {
+        assert!(!prompt.contains("<task>"), "{prompt}");
+    }
     assert_judge_received_the_schema(dir.path());
 }
 
@@ -189,7 +198,7 @@ mod binary {
     use std::time::{Duration, SystemTime};
 
     use super::LINK;
-    use crate::common::{ncli, script};
+    use crate::common::{git, ncli, script};
     use ncli::error::Error;
     use tempfile::TempDir;
 
@@ -282,19 +291,6 @@ esac
         assert!(err.contains("ncli: codex (attempt 1/3) failed: "));
     }
 
-    fn git(repo: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(["-c", "user.name=ncli", "-c", "user.email=ncli@example.com"])
-            .args(args)
-            .current_dir(repo)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {args:?}: {output:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
-
     fn empty_repo() -> TempDir {
         let repo = TempDir::new().unwrap();
         git(
@@ -385,7 +381,7 @@ esac
         let root = repo.path().canonicalize().unwrap();
         assert!(
             prompt.contains(&format!(
-                "about the uncommitted changes in {}. Each reviewer",
+                "about the uncommitted changes in {} on top of {head}. Each reviewer",
                 root.display()
             )),
             "{prompt}"
@@ -612,9 +608,10 @@ esac
         fs::write(repo.join("new.rs"), "fn main() {}\n").unwrap();
         let prompt = verdict_prompt_of_local_review(&repo);
         let root = repo.canonicalize().unwrap();
+        let empty_tree = git(&repo, &["hash-object", "-t", "tree", "/dev/null"]);
         assert!(
             prompt.contains(&format!(
-                "about the uncommitted changes in {}. Each reviewer",
+                "about the uncommitted changes in {} on top of tree {empty_tree}. Each reviewer",
                 root.display()
             )),
             "{prompt}"
@@ -895,11 +892,12 @@ esac
             .unwrap();
         assert_eq!(publish.status.code(), Some(Error::FAILURE.into()));
         let root = repo.path().canonicalize().unwrap();
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
         assert_eq!(
             String::from_utf8(publish.stderr).unwrap().trim(),
             format!(
                 "ncli code publish-comment: error: the last review was of the uncommitted changes \
-                 in {}, which has nowhere to publish comments",
+                 in {} on top of {head}, which has nowhere to publish comments",
                 root.display()
             )
         );

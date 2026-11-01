@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-pub use change::{Change, RemoteBranch};
+pub use change::{Base, Change, Head, RemoteBranch, Worktree};
 pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
 use super::parse_link;
@@ -29,35 +29,45 @@ pub struct Review {
     /// the commits on its current branch that are not on its default branch]
     #[arg(value_parser = parse_link)]
     pub link: Option<String>,
-    /// Reviewer that writes the final verdict
-    #[arg(long, value_enum, default_value_t)]
-    pub judge: AgentKind,
+    #[command(flatten)]
+    pub panel: Panel,
 }
 
 impl Review {
     pub fn run(&self, context: &Context) -> Result<Output, Error> {
         state::remove(Entry::Review)?;
-        let reviewers: Vec<Agent> = AgentKind::value_variants()
-            .iter()
-            .map(|&kind| reviewer(kind))
-            .collect();
-        process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
+        let (reviewers, judge) = self.panel.agents()?;
         let change = match &self.link {
             Some(link) => Change::Link(link.clone()),
             None => Change::local(context.cancellation)?,
         };
-        let judge = reviewer(self.judge);
-        let verdict = debate(&change, &reviewers, &judge, context)?;
+        let verdict = debate(&change, None, &reviewers, &judge, context)?;
         let text = Report {
             prog: context.prog,
             verdict: &verdict,
         }
         .to_string();
-        let review = LastReview { change, verdict };
-        let json = serde_json::to_string(&review).expect("a review serializes to JSON");
         let mut output = Output::from(text);
-        output.records.push((Entry::Review, json));
+        output.records.push(LastReview { change, verdict }.record());
         Ok(output)
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct Panel {
+    /// Reviewer that writes the final verdict
+    #[arg(long, value_enum, default_value_t)]
+    pub judge: AgentKind,
+}
+
+impl Panel {
+    pub fn agents(&self) -> Result<(Vec<Agent>, Agent), Error> {
+        let reviewers: Vec<Agent> = AgentKind::value_variants()
+            .iter()
+            .map(|&kind| reviewer(kind))
+            .collect();
+        process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
+        Ok((reviewers, reviewer(self.judge)))
     }
 }
 
@@ -71,6 +81,11 @@ impl LastReview {
     pub fn load() -> Result<Self, Error> {
         let json = state::load(Entry::Review)?.ok_or(Error::NoReview)?;
         serde_json::from_slice(&json).map_err(Error::SavedReview)
+    }
+
+    pub fn record(&self) -> (Entry, String) {
+        let json = serde_json::to_string(self).expect("a review serializes to JSON");
+        (Entry::Review, json)
     }
 }
 
@@ -101,11 +116,14 @@ fn ask(
 
 pub fn debate(
     change: &Change,
+    task: Option<&str>,
     reviewers: &[Agent],
     judge: &Agent,
     context: &Context,
 ) -> Result<Verdict, Error> {
-    let reviews = ask_all(reviewers, "review", context, |_| prompts::review(change))?;
+    let reviews = ask_all(reviewers, "review", context, |_| {
+        prompts::review(change, task)
+    })?;
     let mut debate = sections("Review", &reviews);
     let rebuttals = ask_all(reviewers, "rebuttal", context, |name| {
         let own = reviews
@@ -114,13 +132,13 @@ pub fn debate(
             .map(|(_, review)| review.trim())
             .expect("every reviewer has a review");
         let others = sections("Review", reviews.iter().filter(|(other, _)| *other != name));
-        prompts::rebuttal(change, own, &transcript(&others))
+        prompts::rebuttal(change, task, own, &transcript(&others))
     })?;
     debate.extend(sections("Rebuttal", &rebuttals));
     context.progress("verdict");
     let verdict = ask(
         judge,
-        &prompts::judge(change, &transcript(&debate)),
+        &prompts::judge(change, task, &transcript(&debate)),
         Some(&SCHEMA),
         context.cancellation,
     )?;

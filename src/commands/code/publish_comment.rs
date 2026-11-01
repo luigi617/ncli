@@ -23,9 +23,7 @@ impl PublishComment {
             return Err(Error::Unpublishable(change));
         };
         let agent = AgentKind::first_available()?;
-        let count = verdict.findings.len();
-        let findings = if count == 1 { "finding" } else { "findings" };
-        context.progress(&format!("publishing {count} {findings} to {link}"));
+        context.progress(&format!("publishing {} to {link}", verdict.count()));
         let task = self.guidance.apply(prompt(&link, &verdict.findings));
         agent.perform_isolated(&task, context.cancellation)
     }
