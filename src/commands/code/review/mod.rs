@@ -33,13 +33,13 @@ pub struct Review {
 
 impl Review {
     pub fn run(&self, context: &Context) -> Result<Output, Error> {
+        state::remove(Entry::Review)?;
         let reviewers: Vec<Agent> = AgentKind::value_variants()
             .iter()
             .map(|&kind| reviewer(kind))
             .collect();
         process::require_executables(reviewers.iter().map(|reviewer| reviewer.cli.executable()))?;
         let judge = reviewer(self.judge);
-        state::remove(Entry::Review)?;
         let verdict = debate(&self.link, &reviewers, &judge, context)?;
         let text = Report {
             prog: context.prog,

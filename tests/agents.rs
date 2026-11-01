@@ -461,6 +461,16 @@ esac
         assert_eq!(failed.status.code(), Some(Error::FAILURE.into()));
         let publish = env.run(&["code", "publish-comment"]);
         assert!(stderr(&publish).contains("there is no review to publish"));
+
+        env.succeed(&["code", "review", LINK]);
+        fs::remove_file(env.bin.path().join("codex")).unwrap();
+        let missing = env.run(&["code", "review", LINK]);
+        assert_eq!(
+            missing.status.code(),
+            Some(Error::MISSING_EXECUTABLE.into())
+        );
+        let publish = env.run(&["code", "publish-comment"]);
+        assert!(stderr(&publish).contains("there is no review to publish"));
     }
 
     #[test]
