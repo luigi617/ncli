@@ -87,6 +87,8 @@ fn reviewers_review_rebut_and_judge() {
         panic!("a should be asked twice");
     };
     assert!(review.contains(LINK));
+    assert!(review.contains("changes that are not necessary"));
+    assert!(review.contains("code that could be simpler or cleaner"));
     let (own, others) = rebuttal
         .split_once("The other reviewers' findings:")
         .unwrap();
@@ -95,6 +97,7 @@ fn reviewers_review_rebut_and_judge() {
     assert!(!others.contains("a answer 0"));
 
     let verdict_prompt = judge_received(dir.path(), "prompt");
+    assert!(verdict_prompt.contains("code that could be simpler or cleaner are findings too"));
     for name in ["a", "b", "c"] {
         assert!(verdict_prompt.contains(&format!("## Review: {name}\n\n{name} answer 0")));
         assert!(verdict_prompt.contains(&format!("## Rebuttal: {name}\n\n{name} answer 1")));
@@ -572,18 +575,41 @@ esac
     }
 
     #[test]
-    fn uncommitted_changes_inside_a_submodule_are_rejected() {
-        let (repo, _sub) = repo_with_submodule();
-        fs::write(repo.path().join("sub/README.md"), "changed\n").unwrap();
-        let root = repo.path().canonicalize().unwrap();
-        let error = local_review_error(repo.path());
+    fn uncommitted_changes_inside_a_submodule_are_rejected_even_when_ignored() {
+        for ignore in [None, Some("dirty"), Some("all")] {
+            let (repo, _sub) = repo_with_submodule();
+            if let Some(ignore) = ignore {
+                git(repo.path(), &["config", "submodule.sub.ignore", ignore]);
+            }
+            fs::write(repo.path().join("sub/README.md"), "changed\n").unwrap();
+            let root = repo.path().canonicalize().unwrap();
+            let error = local_review_error(repo.path());
+            assert!(
+                error.contains(&format!(
+                    "ncli code review: error: the uncommitted changes inside submodules of {} \
+                     cannot be reviewed (sub); commit them in the submodules first",
+                    root.display()
+                )),
+                "{ignore:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repository_path_ending_in_whitespace_is_kept() {
+        let parent = TempDir::new().unwrap();
+        let repo = parent.path().join("repo ");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "--initial-branch", "main"]);
+        fs::write(repo.join("new.rs"), "fn main() {}\n").unwrap();
+        let prompt = verdict_prompt_of_local_review(&repo);
+        let root = repo.canonicalize().unwrap();
         assert!(
-            error.contains(&format!(
-                "ncli code review: error: the uncommitted changes inside submodules of {} cannot \
-                 be reviewed (sub); commit them in the submodules first",
+            prompt.contains(&format!(
+                "about the uncommitted changes in {}. Each reviewer",
                 root.display()
             )),
-            "{error}"
+            "{prompt}"
         );
     }
 
@@ -604,8 +630,8 @@ esac
         let error = local_review_error(outside.path());
         assert!(
             error.contains(
-                "ncli code review: error: there are no local changes to review outside a git \
-                 work tree; give a link instead: git exited with code 128: fatal: not a git \
+                "ncli code review: error: could not find a git work tree to review the local \
+                 changes of; give a link instead: git exited with code 128: fatal: not a git \
                  repository"
             ),
             "{error}"

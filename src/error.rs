@@ -38,7 +38,7 @@ pub enum Error {
     #[error("there is nothing to review in {}: no commits and no uncommitted changes", .0.display())]
     NoCommits(PathBuf),
     #[error(
-        "there are no local changes to review outside a git work tree; give a link instead: {0}"
+        "could not find a git work tree to review the local changes of; give a link instead: {0}"
     )]
     NotAWorkTree(#[source] ProcessError),
     #[error("could not snapshot the uncommitted changes: {0}")]

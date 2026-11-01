@@ -41,7 +41,7 @@ impl Git<'_> {
     fn run_with_input(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, ProcessError> {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
         let output = self.cli.run(&args, input, None, self.cancellation)?;
-        Ok(output.trim().to_owned())
+        Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
     }
 
     fn head(&self) -> Result<Option<String>, ProcessError> {
@@ -72,7 +72,13 @@ impl Git<'_> {
     }
 
     fn dirty_submodules(&self) -> Result<Vec<String>, ProcessError> {
-        let status = self.run(&["--no-optional-locks", "status", "--porcelain=v2", "-z"])?;
+        let status = self.run(&[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--ignore-submodules=none",
+        ])?;
         let mut entries = status.split('\0');
         let mut dirty = Vec::new();
         while let Some(entry) = entries.next() {

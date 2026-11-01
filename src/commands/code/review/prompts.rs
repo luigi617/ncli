@@ -3,8 +3,11 @@ use super::Change;
 pub fn review(change: &Change) -> String {
     format!(
         "Review {change}. {} Do not modify anything and do not post comments.\n\
-         Report concrete findings (bugs, correctness, security, design), each with file, line, \
-         severity, and reasoning. If you cannot access the change, say so and stop.",
+         Report concrete findings, each with file, line, severity, and reasoning: bugs and \
+         correctness, security, and design problems; changes that are not necessary for what the \
+         change sets out to do; and code that could be simpler or cleaner, such as duplicated logic, \
+         dead code, needless indirection, or existing code it should reuse. If you cannot access the \
+         change, say so and stop.",
         change.access()
     )
 }
@@ -34,9 +37,10 @@ pub fn judge(change: &Change, debate: &str) -> String {
          {debate}\n\
          \n\
          Verify the disputed points against the change yourself and report only the findings that \
-         survive, as JSON matching the given schema. For each finding, give the file and the most \
-         relevant line, a short title, a one or two sentence explanation of what is wrong and why it \
-         matters, and a one sentence fix. Report no findings if none survive. Set change_accessed to \
+         survive, as JSON matching the given schema. Unnecessary changes and code that could be \
+         simpler or cleaner are findings too, rated by how much they matter. For each finding, give \
+         the file and the most relevant line, a short title, a one or two sentence explanation of \
+         what is wrong and why it matters, and a one sentence fix. Report no findings if none survive. Set change_accessed to \
          false, with no findings, if you or any reviewer could not access the change. Do not modify \
          anything and do not post comments.",
         change.access()
