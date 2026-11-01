@@ -87,8 +87,9 @@ fn reviewers_review_rebut_and_judge() {
         panic!("a should be asked twice");
     };
     assert!(review.contains(LINK));
-    assert!(review.contains("changes that are not necessary"));
-    assert!(review.contains("code that could be simpler or cleaner"));
+    assert!(review.contains("never invent a finding"));
+    assert!(review.contains("Reproduce every bug before reporting it"));
+    assert!(rebuttal.contains("reproducing each bug yourself before agreeing with it"));
     let (own, others) = rebuttal
         .split_once("The other reviewers' findings:")
         .unwrap();
@@ -97,7 +98,8 @@ fn reviewers_review_rebut_and_judge() {
     assert!(!others.contains("a answer 0"));
 
     let verdict_prompt = judge_received(dir.path(), "prompt");
-    assert!(verdict_prompt.contains("code that could be simpler or cleaner are findings too"));
+    assert!(verdict_prompt.contains("Keep a bug only if it was reproduced."));
+    assert!(verdict_prompt.contains("No findings is the right verdict for a good change."));
     for name in ["a", "b", "c"] {
         assert!(verdict_prompt.contains(&format!("## Review: {name}\n\n{name} answer 0")));
         assert!(verdict_prompt.contains(&format!("## Rebuttal: {name}\n\n{name} answer 1")));
@@ -390,7 +392,7 @@ esac
         );
         let snapshot = snapshot_of_uncommitted_review(&prompt);
         assert!(prompt.contains(&format!(
-            "`git diff {head} {snapshot}` in the repository at `{}`",
+            "`git diff --ignore-submodules=none --no-ext-diff {head} {snapshot}` in the repository at `{}`",
             root.display()
         )));
         fs::write(repo.path().join("new.rs"), "edited later\n").unwrap();
@@ -451,7 +453,9 @@ esac
         let prompt = verdict_prompt_of_local_review(repo.path());
         let snapshot = snapshot_of_uncommitted_review(&prompt);
         assert!(
-            prompt.contains(&format!("`git diff {empty_tree} {snapshot}`")),
+            prompt.contains(&format!(
+                "`git diff --ignore-submodules=none --no-ext-diff {empty_tree} {snapshot}`"
+            )),
             "{prompt}"
         );
         assert_eq!(
@@ -473,7 +477,7 @@ esac
             "{prompt}"
         );
         assert!(prompt.contains(&format!(
-            "`git log {merge_base}..{head}` and `git diff {merge_base} {head}`"
+            "`git log {merge_base}..{head}` and `git diff --ignore-submodules=none --no-ext-diff {merge_base} {head}`"
         )));
     }
 
@@ -615,6 +619,21 @@ esac
             )),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn the_reviewers_diff_shows_a_submodule_bump_even_when_ignored() {
+        let (repo, _sub) = repo_with_submodule();
+        git(
+            &repo.path().join("sub"),
+            &["commit", "--quiet", "--allow-empty", "--message", "Bump."],
+        );
+        git(repo.path(), &["config", "submodule.sub.ignore", "all"]);
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let (_, command) = prompt.split_once("by running `git ").unwrap();
+        let (command, _) = command.split_once('`').unwrap();
+        let args: Vec<&str> = command.split(' ').chain(["--stat"]).collect();
+        assert!(git(repo.path(), &args).contains("sub |"), "{command}");
     }
 
     #[test]

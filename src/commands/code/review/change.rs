@@ -12,6 +12,8 @@ use crate::process::{self, Cancellation, Cli, ProcessError};
 
 const PREFERRED_REMOTE: &str = "origin";
 const REMOTES: &str = "refs/remotes/";
+// Ignores the user's diff settings, which could otherwise hide parts of the change.
+const DIFF: [&str; 3] = ["diff", "--ignore-submodules=none", "--no-ext-diff"];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,7 +70,7 @@ impl Git<'_> {
     }
 
     fn empty_tree(&self) -> Result<String, ProcessError> {
-        self.run_with_input(&["hash-object", "-w", "-t", "tree", "--stdin"], Some(b""))
+        self.run_with_input(&["hash-object", "-t", "tree", "--stdin"], Some(b""))
     }
 
     fn snapshot(&self, base: &str) -> Result<String, Error> {
@@ -109,7 +111,7 @@ impl Git<'_> {
     }
 
     fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {
-        let args = [&["diff", "--no-renames", "--name-only", "-z"][..], diff].concat();
+        let args = [&DIFF[..], &["--no-renames", "--name-only", "-z"], diff].concat();
         self.run(&args)
     }
 
@@ -117,7 +119,7 @@ impl Git<'_> {
     // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
     fn hidden_edits(&self) -> Result<Vec<String>, ProcessError> {
         let files = self.run(&["ls-files", "-v", "-z"])?;
-        let marked: Vec<&str> = files
+        let marked: HashSet<&str> = files
             .split('\0')
             .filter_map(|entry| entry.split_once(' '))
             .filter(|&(tag, path)| match tag {
@@ -137,7 +139,7 @@ impl Git<'_> {
                 Some(paths.as_bytes()),
             )?;
         }
-        let modified = self.run(&["diff", "--name-only", "-z"])?;
+        let modified = self.changed_paths(&[])?;
         Ok(modified
             .split('\0')
             .filter(|path| marked.contains(path))
@@ -280,6 +282,7 @@ impl Change {
     }
 
     pub(super) fn access(&self) -> String {
+        let diff = DIFF.join(" ");
         match self {
             Self::Link(_) => "Fetch it yourself, using your own tools and skills.".to_owned(),
             Self::Uncommitted {
@@ -287,9 +290,9 @@ impl Change {
                 base,
                 snapshot,
             } => format!(
-                "Read it yourself by running `git diff {base} {snapshot}` in the repository at `{}`, \
-                 and read files with `git show {snapshot}:<path>`, not from the working tree, which \
-                 may have changed since.",
+                "Read it yourself by running `git {diff} {base} {snapshot}` in the repository at \
+                 `{}`, and read files with `git show {snapshot}:<path>`, not from the working tree, \
+                 which may have changed since.",
                 repo.display()
             ),
             Self::Branch {
@@ -298,9 +301,9 @@ impl Change {
                 head,
                 ..
             } => format!(
-                "Read it yourself by running `git log {merge_base}..{head}` and `git diff {merge_base} \
-                 {head}` in the repository at `{}`, and read files with `git show {head}:<path>`, not \
-                 from the working tree, which may have changed since.",
+                "Read it yourself by running `git log {merge_base}..{head}` and `git {diff} \
+                 {merge_base} {head}` in the repository at `{}`, and read files with `git show \
+                 {head}:<path>`, not from the working tree, which may have changed since.",
                 repo.display()
             ),
         }
