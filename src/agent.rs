@@ -207,7 +207,8 @@ impl Agent {
         Ok(Performed { report, resume })
     }
 
-    // Runs away from the user's files. Its session cannot be resumed: agents keep sessions per
+    // Starts in an empty directory instead of the user's, which limits only where the agent works by
+    // default, not what it can reach. Its session cannot be resumed: agents keep sessions per
     // directory, and this one is removed afterwards.
     pub fn perform_isolated(
         &self,

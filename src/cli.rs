@@ -70,12 +70,23 @@ fn report(prog: &str, error: &Error, record: bool) {
 
 fn print(output: &Output) -> Result<(), Error> {
     let printed = writeln!(io::stdout(), "{}", output.text).map_err(Error::Output);
-    let saved = output
-        .records
-        .iter()
-        .try_for_each(|(entry, contents)| state::save(*entry, contents))
-        .and_then(|()| state::remove(Entry::Failure));
-    saved.and(printed)
+    saved(&output.records).and(printed)
+}
+
+// A record that fails to save is removed with the ones after it, so none is left from an older run.
+fn saved(records: &[(Entry, String)]) -> Result<(), Error> {
+    state::remove(Entry::Failure)?;
+    for (index, (entry, contents)) in records.iter().enumerate() {
+        if let Err(error) = state::save(*entry, contents) {
+            let removed: Vec<_> = records[index..]
+                .iter()
+                .map(|(entry, _)| state::remove(*entry))
+                .collect();
+            removed.into_iter().collect::<Result<(), _>>()?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn prog(matches: &ArgMatches) -> String {

@@ -430,6 +430,21 @@ esac
     }
 
     #[test]
+    fn a_failed_save_leaves_no_older_result_or_review_behind() {
+        let env = Env::new(&["claude", "codex"]);
+        env.succeed(&["code", "review", LINK]);
+        fs::write(env.state.path().join("failure.txt"), "ncli: error: older").unwrap();
+        fs::remove_file(env.state.path().join("output.txt")).unwrap();
+        fs::create_dir(env.state.path().join("output.txt")).unwrap();
+        let output = env.run(&["code", "review", LINK]);
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert!(!env.state.path().join("failure.txt").exists());
+        assert!(!env.state.path().join("review.json").exists());
+        let publish = env.run(&["code", "publish-comment"]);
+        assert!(stderr(&publish).contains("there is no review to publish"));
+    }
+
+    #[test]
     fn an_empty_state_directory_variable_is_ignored() {
         let env = Env::new(&["claude"]);
         let home = TempDir::new().unwrap();
