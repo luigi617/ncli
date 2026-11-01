@@ -38,6 +38,13 @@ pub enum Command {
 }
 
 impl Command {
+    pub fn records_output(&self) -> bool {
+        match self {
+            Self::Code(_) | Self::Task(_) => true,
+            Self::Copy | Self::Init(_) => false,
+        }
+    }
+
     pub fn run(&self, context: &Context) -> Result<Option<Output>, Error> {
         match self {
             Self::Code(command) => command.run(context).map(Some),

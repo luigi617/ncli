@@ -7,7 +7,7 @@ use crate::commands::{Command, Context, Output};
 use crate::error::Error;
 use crate::interrupt;
 use crate::process::Cancellation;
-use crate::state;
+use crate::state::{self, Entry};
 use crate::stderr;
 
 /// Run workflows that chain other CLIs.
@@ -39,14 +39,28 @@ pub fn run() -> ExitCode {
         .map_err(Error::InterruptHandler)
         .and_then(|()| ncli.command.run(&context))
         .and_then(|output| output.map_or(Ok(()), |output| print(&output)));
-    if cancellation.is_cancelled() {
+    let cancelled = cancellation.is_cancelled();
+    if let Err(error) = &result {
+        if !cancelled || error.resume().is_some() {
+            let record = ncli.command.records_output() && error.exit_code() != Error::USAGE;
+            report(&prog, error, record);
+        }
+    }
+    if cancelled {
         interrupt::exit();
     }
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+        Err(error) => ExitCode::from(error.exit_code()),
+    }
+}
+
+fn report(prog: &str, error: &Error, record: bool) {
+    let message = format!("{prog}: error: {error}");
+    stderr::line(format_args!("{message}"));
+    if record {
+        if let Err(error) = state::save(Entry::Output, &message) {
             stderr::line(format_args!("{prog}: error: {error}"));
-            ExitCode::from(error.exit_code())
         }
     }
 }

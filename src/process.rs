@@ -32,24 +32,44 @@ pub enum ProcessError {
     #[error("{name} failed: {source}")]
     Io { name: String, source: io::Error },
     #[error("{name} timed out after {}s", .timeout.as_secs_f64())]
-    Timeout { name: String, timeout: Duration },
+    Timeout {
+        name: String,
+        timeout: Duration,
+        stdout: String,
+    },
     #[error("{name} was cancelled")]
-    Cancelled { name: String },
+    Cancelled { name: String, stdout: String },
     #[error("{name} exited, but a process it started kept its output open")]
-    OutputHeldOpen { name: String },
+    OutputHeldOpen { name: String, stdout: String },
     #[error("{name} was killed by signal {signal}")]
-    Signal { name: String, signal: i32 },
+    Signal {
+        name: String,
+        signal: i32,
+        stdout: String,
+    },
     #[error("{name} exited with code {code}{}", detail(.stderr_tail))]
     Exit {
         name: String,
         code: i32,
         stderr_tail: String,
+        stdout: String,
     },
 }
 
 impl ProcessError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Exit { .. })
+    }
+
+    pub fn stdout(&self) -> &str {
+        match self {
+            Self::Spawn { .. } | Self::Io { .. } => "",
+            Self::Timeout { stdout, .. }
+            | Self::Cancelled { stdout, .. }
+            | Self::OutputHeldOpen { stdout, .. }
+            | Self::Signal { stdout, .. }
+            | Self::Exit { stdout, .. } => stdout,
+        }
     }
 }
 
@@ -194,15 +214,20 @@ impl Tracer for StderrTracer {
     }
 }
 
-fn failure(call: &Call, outcome: &Outcome) -> ProcessError {
+fn failure(call: &Call, outcome: Outcome) -> ProcessError {
     let name = call.name().into_owned();
     if let Some(signal) = sys::signal(outcome.status) {
-        return ProcessError::Signal { name, signal };
+        return ProcessError::Signal {
+            name,
+            signal,
+            stdout: outcome.stdout,
+        };
     }
     ProcessError::Exit {
         name,
         code: outcome.returncode(),
         stderr_tail: last_lines(&outcome.stderr),
+        stdout: outcome.stdout,
     }
 }
 
@@ -291,6 +316,7 @@ impl Cli {
                     if cancellation.sleep(self.retry_delay) {
                         return Err(ProcessError::Cancelled {
                             name: call.name().into_owned(),
+                            stdout: error.stdout().to_owned(),
                         });
                     }
                 }
@@ -315,7 +341,7 @@ impl Cli {
                 if outcome.status.success() {
                     Ok(outcome.stdout)
                 } else {
-                    Err(failure(call, &outcome))
+                    Err(failure(call, outcome))
                 }
             });
         if let Err(error) = &result {
@@ -354,21 +380,29 @@ impl Cli {
         drop(registration);
         let status = process.wait().map_err(io_error)?;
         let communicated = communicated.map_err(io_error)?;
+        let stdout = universal_newlines(&communicated.stdout);
         if communicated.timed_out {
             return Err(ProcessError::Timeout {
                 name: name(),
                 timeout: self.timeout.expect("only a timeout stops the wait early"),
+                stdout,
             });
         }
         if cancellation.is_cancelled() {
-            return Err(ProcessError::Cancelled { name: name() });
+            return Err(ProcessError::Cancelled {
+                name: name(),
+                stdout,
+            });
         }
         if status.success() && !communicated.output_closed {
-            return Err(ProcessError::OutputHeldOpen { name: name() });
+            return Err(ProcessError::OutputHeldOpen {
+                name: name(),
+                stdout,
+            });
         }
         Ok(Outcome {
             status,
-            stdout: universal_newlines(&communicated.stdout),
+            stdout,
             stderr: universal_newlines(&communicated.stderr),
             duration: start.elapsed(),
         })

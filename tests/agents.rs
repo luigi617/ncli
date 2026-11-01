@@ -3,7 +3,7 @@ mod common;
 use common::child;
 use ncli::agent::{Agent, SchemaArg, Session};
 use ncli::error::Error;
-use ncli::process::Cancellation;
+use ncli::process::{Cancellation, Cli};
 
 fn agent(answer: &str, session: Session) -> Agent {
     Agent {
@@ -62,7 +62,10 @@ fn an_agent_that_reports_no_session_is_an_error() {
 #[test]
 fn an_unfinished_task_is_an_error_that_says_how_to_resume() {
     let error = perform(&assigned(r#"{"completed": false, "report": "No access."}"#)).unwrap_err();
-    assert!(matches!(error, Error::Incomplete { .. }), "{error}");
+    assert!(
+        resumable(&error, |source| matches!(source, Error::Incomplete { .. })),
+        "{error}"
+    );
     assert_eq!(error.exit_code(), Error::FAILURE);
     let message = error.to_string();
     assert!(
@@ -80,7 +83,10 @@ fn an_answer_that_does_not_match_the_schema_is_an_error() {
     ] {
         let error = perform(&assigned(answer)).unwrap_err();
         assert!(
-            matches!(error, Error::InvalidOutcome { .. }),
+            resumable(&error, |source| matches!(
+                source,
+                Error::InvalidAnswer { .. }
+            )),
             "{answer}: {error}"
         );
         assert!(
@@ -88,6 +94,50 @@ fn an_answer_that_does_not_match_the_schema_is_an_error() {
             "{error}"
         );
     }
+}
+
+fn resumable(error: &Error, source: impl Fn(&Error) -> bool) -> bool {
+    matches!(error, Error::Resumable { source: inner, .. } if source(inner))
+}
+
+#[test]
+fn an_agent_that_fails_after_its_session_starts_says_how_to_resume() {
+    let claude = Agent {
+        cli: child(&["fail", "3", "boom"]),
+        ..assigned("")
+    };
+    let codex = Agent {
+        cli: child(&["start-and-fail"]),
+        ..agent("", Session::FromEvents("--json"))
+    };
+    for (agent, resume) in [(claude, "agent resume "), (codex, "agent resume thread-1")] {
+        let error = perform(&agent).unwrap_err();
+        assert!(
+            resumable(&error, |source| matches!(source, Error::Process(_))),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .resume()
+                .map(|resume| resume.starts_with("agent resume ")),
+            Some(true)
+        );
+        assert!(
+            error.to_string().contains(&format!("\nResume: {resume}")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn an_agent_that_never_started_has_nothing_to_resume() {
+    let agent = Agent {
+        cli: Cli::new(["ncli-no-such-agent"]),
+        ..assigned("")
+    };
+    let error = perform(&agent).unwrap_err();
+    assert!(matches!(error, Error::Process(_)), "{error}");
+    assert!(error.resume().is_none());
 }
 
 #[cfg(unix)]
@@ -113,6 +163,11 @@ case "$prompt" in
     printf '%s' "$prompt" > "$NCLI_TEST_LOG/$name.prompt"
     pwd -P > "$NCLI_TEST_LOG/$name.cwd"
     printf '%s' "$*" > "$NCLI_TEST_LOG/$name.args"
+    if [ -n "$FAKE_HANG" ]; then
+        [ "$name" = codex ] && echo '{"type":"thread.started","thread_id":"codex-thread"}'
+        touch "$NCLI_TEST_LOG/$name.started"
+        sleep 30
+    fi
     case "$name" in
     codex)
         echo '{"type":"thread.started","thread_id":"codex-thread"}'
@@ -284,6 +339,60 @@ esac
     }
 
     #[test]
+    fn an_interrupted_task_says_how_to_resume_and_records_it() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::Stdio;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        for (installed, resume) in [
+            ("claude", "claude --resume "),
+            ("codex", "codex resume codex-thread"),
+        ] {
+            let env = Env::new(&[installed]);
+            let task = env
+                .ncli(&["fix the bug"])
+                .env("FAKE_HANG", "1")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while env.logged(&format!("{installed}.started")).is_none() {
+                assert!(Instant::now() < deadline, "{installed} never started");
+                thread::sleep(Duration::from_millis(20));
+            }
+            unsafe { libc::kill(task.id() as libc::pid_t, libc::SIGINT) };
+            let output = task.wait_with_output().unwrap();
+            assert_eq!(output.status.signal(), Some(libc::SIGINT));
+            let expected = format!("ncli: error: {installed} was cancelled\nResume: {resume}");
+            assert!(stderr(&output).contains(&expected), "{}", stderr(&output));
+            let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
+            assert!(saved.starts_with(&expected), "{saved}");
+        }
+    }
+
+    #[test]
+    fn a_failed_task_replaces_the_last_output_but_a_failed_copy_or_a_typo_does_not() {
+        let env = Env::new(&["claude"]);
+        let saved = || fs::read_to_string(env.state.path().join("output.txt")).ok();
+        env.run(&["copy"]);
+        assert_eq!(saved(), None);
+        env.succeed(&["fix the bug"]);
+        let output = env
+            .ncli(&["fix the bug"])
+            .env("FAKE_COMPLETED", "false")
+            .output()
+            .unwrap();
+        let error = saved().unwrap();
+        assert!(error.starts_with("ncli: error: claude could not finish the task: "));
+        assert!(stderr(&output).trim_end().ends_with(&error), "{error}");
+        env.run(&["copy"]);
+        env.run(&["cpy"]);
+        assert_eq!(saved().unwrap(), error);
+    }
+
+    #[test]
     fn an_empty_task_is_a_usage_error() {
         let output = Env::new(&["claude"]).run(&[" "]);
         assert_eq!(output.status.code(), Some(Error::USAGE.into()));
@@ -431,11 +540,17 @@ esac
         let ncli = env!("CARGO_BIN_EXE_ncli");
         let lines = [
             format!(r#"eval "$({ncli} init zsh)""#),
-            "ncli_captured=(echo)".to_owned(),
-            "FOO=1 echo hello; printf '\\033[31mred\\033[0m\\n' >&2".to_owned(),
+            "ncli_captured=(sh)".to_owned(),
+            r#"FOO=1 sh -c 'echo hello; printf "\033[31mred\033[0m\n" >&2'"#.to_owned(),
+            "sh -c 'echo compound'; echo other".to_owned(),
             "printf 'not recorded\\n'".to_owned(),
             format!("{ncli} copy"),
             r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/first""#.to_owned(),
+            "sh -c 'echo early; (sleep 3; echo late) &'".to_owned(),
+            format!(r#"{ncli} copy 2> "$NCLI_TEST_LOG/still""#),
+            "sleep 3".to_owned(),
+            format!("{ncli} copy"),
+            r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/late""#.to_owned(),
             format!("{ncli} 'fix the bug'"),
             format!("{ncli} copy"),
             "exit".to_owned(),
@@ -461,6 +576,11 @@ esac
         }
         assert!(zsh.wait().unwrap().success());
         assert_eq!(env.logged("first").unwrap(), "hello\nred\n");
+        assert_eq!(
+            env.logged("still").unwrap().trim(),
+            "ncli copy: error: the output of the last command is still being recorded"
+        );
+        assert_eq!(env.logged("late").unwrap(), "early\nlate\n");
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;

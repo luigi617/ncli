@@ -12,6 +12,7 @@ pub enum Entry {
     Output,
     Review,
     Terminal,
+    Recording,
 }
 
 impl Entry {
@@ -20,6 +21,7 @@ impl Entry {
             Self::Output => "output.txt",
             Self::Review => "review.json",
             Self::Terminal => "terminal.txt",
+            Self::Recording => "recording.txt",
         }
     }
 }
@@ -30,6 +32,7 @@ impl fmt::Display for Entry {
             Self::Output => "output",
             Self::Review => "review",
             Self::Terminal => "terminal output",
+            Self::Recording => "recording",
         })
     }
 }
@@ -82,7 +85,18 @@ pub fn load(entry: Entry) -> Result<Option<Vec<u8>>, Error> {
 }
 
 pub fn last_output() -> Result<String, Error> {
-    let output = latest(&[Entry::Output, Entry::Terminal])?.unwrap_or_default();
+    let entry = match newest(&[Entry::Output, Entry::Terminal, Entry::Recording])? {
+        Some(Entry::Recording) => {
+            let partial = load(Entry::Recording)?.unwrap_or_default();
+            if Path::new(String::from_utf8_lossy(&partial).trim_end()).exists() {
+                return Err(Error::StillRecording);
+            }
+            Entry::Terminal
+        }
+        Some(entry) => entry,
+        None => return Err(Error::NoOutput),
+    };
+    let output = load(entry)?.unwrap_or_default();
     let output = String::from_utf8_lossy(&strip_ansi_escapes::strip(output)).into_owned();
     if output.trim().is_empty() {
         return Err(Error::NoOutput);
@@ -90,7 +104,7 @@ pub fn last_output() -> Result<String, Error> {
     Ok(output)
 }
 
-fn latest(entries: &[Entry]) -> Result<Option<Vec<u8>>, Error> {
+fn newest(entries: &[Entry]) -> Result<Option<Entry>, Error> {
     let mut newest: Option<(SystemTime, Entry)> = None;
     for &entry in entries {
         let modified =
@@ -102,7 +116,7 @@ fn latest(entries: &[Entry]) -> Result<Option<Vec<u8>>, Error> {
             newest = Some((modified, entry));
         }
     }
-    newest.map_or(Ok(None), |(_, entry)| load(entry))
+    Ok(newest.map(|(_, entry)| entry))
 }
 
 fn found<T>(entry: Entry, result: io::Result<T>) -> Result<Option<T>, Error> {

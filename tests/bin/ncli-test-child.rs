@@ -122,6 +122,13 @@ fn main() -> ExitCode {
             "{}",
             serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": answer}})
         ),
+        ["start-and-fail", "--json", "--schema", _] => {
+            println!(
+                "{}",
+                serde_json::json!({"type": "thread.started", "thread_id": "thread-1"})
+            );
+            return ExitCode::FAILURE;
+        }
         ["sleep", seconds] => sleep(seconds),
         #[cfg(unix)]
         ["session"] => {

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::Error;
-use crate::process::{self, Cancellation, Cli, NoExecutable, StderrTracer};
+use crate::process::{self, Cancellation, Cli, NoExecutable, ProcessError, StderrTracer};
 
 pub static TASK_SCHEMA: LazyLock<String> =
     LazyLock::new(|| schema(include_str!("agent/task.schema.json")));
@@ -105,9 +105,9 @@ impl Session {
         }
     }
 
-    fn read(&self, assigned: Option<String>, output: String) -> (Option<String>, String) {
+    fn read(&self, assigned: Option<String>, output: &str) -> (Option<String>, String) {
         match self {
-            Self::Assigned(_) => (assigned, output),
+            Self::Assigned(_) => (assigned, output.to_owned()),
             Self::FromEvents(_) => {
                 let (mut id, mut answer) = (None, String::new());
                 for event in output
@@ -192,9 +192,21 @@ impl Agent {
              you could not finish the task, and put in report the answer, or what you did and why."
         );
         let (args, assigned) = self.session.start();
-        let output = self.invoke(args, &prompt, Some(&TASK_SCHEMA), None, cancellation)?;
-        let (id, answer) = self.session.read(assigned, output);
-        let id = id.ok_or_else(|| Error::NoSession(self.name.clone()))?;
+        let result = self.invoke(args, &prompt, Some(&TASK_SCHEMA), None, cancellation);
+        let ran = match &result {
+            Ok(output) => Some(output.as_str()),
+            Err(Error::Process(error)) if !matches!(error, ProcessError::Spawn { .. }) => {
+                Some(error.stdout())
+            }
+            Err(_) => None,
+        };
+        let (id, answer) = ran.map_or((None, String::new()), |output| {
+            self.session.read(assigned, output)
+        });
+        let Some(id) = id else {
+            result?;
+            return Err(Error::NoSession(self.name.clone()));
+        };
         let resume = self
             .resume
             .iter()
@@ -202,24 +214,30 @@ impl Agent {
             .chain([id.as_str()])
             .collect::<Vec<_>>()
             .join(" ");
+        let report = result
+            .and_then(|_| self.outcome(answer))
+            .map_err(|source| Error::Resumable {
+                source: Box::new(source),
+                resume: resume.clone(),
+            })?;
+        Ok(Performed { report, resume })
+    }
+
+    fn outcome(&self, answer: String) -> Result<String, Error> {
         let outcome: Outcome =
-            serde_json::from_str(&answer).map_err(|source| Error::InvalidOutcome {
+            serde_json::from_str(&answer).map_err(|source| Error::InvalidAnswer {
                 agent: self.name.clone(),
                 source,
                 output: answer,
-                resume: resume.clone(),
             })?;
-        if !outcome.completed {
-            return Err(Error::Incomplete {
+        if outcome.completed {
+            Ok(outcome.report)
+        } else {
+            Err(Error::Incomplete {
                 agent: self.name.clone(),
                 report: outcome.report,
-                resume,
-            });
+            })
         }
-        Ok(Performed {
-            report: outcome.report,
-            resume,
-        })
     }
 
     fn invoke(

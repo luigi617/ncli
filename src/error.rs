@@ -18,24 +18,12 @@ pub enum Error {
         source: serde_json::Error,
         output: String,
     },
-    #[error(
-        "{agent} returned an invalid answer ({source}): {}\nResume: {resume}",
-        last_lines(.output)
-    )]
-    InvalidOutcome {
-        agent: String,
-        source: serde_json::Error,
-        output: String,
-        resume: String,
-    },
     #[error("{0} did not report its session")]
     NoSession(String),
-    #[error("{agent} could not finish the task: {}\nResume: {resume}", .report.trim())]
-    Incomplete {
-        agent: String,
-        report: String,
-        resume: String,
-    },
+    #[error("{agent} could not finish the task: {}", .report.trim())]
+    Incomplete { agent: String, report: String },
+    #[error("{source}\nResume: {resume}")]
+    Resumable { source: Box<Error>, resume: String },
     #[error("the judge could not access the change at {0}")]
     ChangeUnavailable(String),
     #[error("the task is empty")]
@@ -46,6 +34,8 @@ pub enum Error {
     NotATask(String),
     #[error("there is no last output")]
     NoOutput,
+    #[error("the output of the last command is still being recorded")]
+    StillRecording,
     #[error("there is no review to publish; run `ncli code review` first")]
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
@@ -77,17 +67,25 @@ impl Error {
     pub const USAGE: u8 = 2;
     pub const MISSING_EXECUTABLE: u8 = 127;
 
+    pub fn resume(&self) -> Option<&str> {
+        match self {
+            Self::Resumable { resume, .. } => Some(resume),
+            _ => None,
+        }
+    }
+
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,
             Self::EmptyTask | Self::NotATask(_) => Self::USAGE,
+            Self::Resumable { source, .. } => source.exit_code(),
             Self::WorkingDirectory(_)
             | Self::InvalidAnswer { .. }
-            | Self::InvalidOutcome { .. }
             | Self::NoSession(_)
             | Self::Incomplete { .. }
             | Self::ChangeUnavailable(_)
             | Self::NoOutput
+            | Self::StillRecording
             | Self::NoReview
             | Self::NothingToPublish(_)
             | Self::ClipboardUnsupported

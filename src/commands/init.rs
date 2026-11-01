@@ -12,7 +12,9 @@ use crate::state::{self, Entry};
 /// Print shell code that records the output of chosen commands for `ncli copy`.
 ///
 /// Add `eval "$(ncli init zsh)"` to ~/.zshrc, or run `ncli init zsh --install` to add it.
-/// Only commands named in the ncli_captured array are recorded, for example `ncli_captured=(gh)`.
+/// Only commands named in the ncli_captured array are recorded, for example `ncli_captured=(gh)`,
+/// and only when they run alone on the command line. Wrappers such as sudo and env are looked past,
+/// but not the values of their options.
 /// A recorded command writes to a pipe instead of the terminal, with stderr merged into stdout,
 /// so do not add interactive programs such as editors and pagers.
 #[derive(Debug, Args)]
@@ -62,12 +64,16 @@ impl Init {
 }
 
 fn script(shell: Shell) -> Result<String, Error> {
-    let capture = state::path(Entry::Terminal)?;
-    let capture = capture
-        .to_str()
-        .ok_or_else(|| Error::NonUtf8StateDir(capture.clone()))?;
+    let path = |entry| {
+        let path = state::path(entry)?;
+        path.to_str()
+            .map(quote)
+            .ok_or_else(|| Error::NonUtf8StateDir(path.clone()))
+    };
     Ok(match shell {
-        Shell::Zsh => include_str!("init/init.zsh").replace("NCLI_CAPTURE", &quote(capture)),
+        Shell::Zsh => include_str!("init/init.zsh")
+            .replace("NCLI_CAPTURE", &path(Entry::Terminal)?)
+            .replace("NCLI_RECORDING", &path(Entry::Recording)?),
     })
 }
 
