@@ -40,8 +40,8 @@ pub enum Error {
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
     NothingToPublish(String),
-    #[error("copying to the clipboard is not supported on this platform")]
-    ClipboardUnsupported,
+    #[error("there is no display to copy to; set WAYLAND_DISPLAY or DISPLAY")]
+    NoClipboard,
     #[error("could not find your home directory")]
     NoHome,
     #[error("could not update {}: {source}", .path.display())]
@@ -88,7 +88,7 @@ impl Error {
             | Self::StillRecording
             | Self::NoReview
             | Self::NothingToPublish(_)
-            | Self::ClipboardUnsupported
+            | Self::NoClipboard
             | Self::NoHome
             | Self::StartupFile { .. }
             | Self::NonUtf8StateDir(_)

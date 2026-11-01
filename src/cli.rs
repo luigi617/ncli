@@ -59,7 +59,7 @@ fn report(prog: &str, error: &Error, record: bool) {
     let message = format!("{prog}: error: {error}");
     stderr::line(format_args!("{message}"));
     if record {
-        if let Err(error) = state::save(Entry::Output, &message) {
+        if let Err(error) = state::save(Entry::Failure, &message) {
             stderr::line(format_args!("{prog}: error: {error}"));
         }
     }

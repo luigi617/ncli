@@ -259,6 +259,8 @@ impl Agent {
                     .map_err(Error::WorkingDirectory)?,
             );
         }
-        Ok(self.cli.run(&args, Some(prompt), cwd, cancellation)?)
+        Ok(self
+            .cli
+            .run(&args, Some(prompt.as_bytes()), cwd, cancellation)?)
     }
 }

@@ -20,7 +20,7 @@ impl AddressComment {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
         let feedback = match &self.link {
             Some(link) => linked(link),
-            None => given(&state::last_output()?),
+            None => given(&state::last_successful_output()?),
         };
         let agent = AgentKind::first_available()?;
         let task = format!(

@@ -21,7 +21,7 @@ fn run_returns_stdout_and_passes_argv_input_and_cwd() {
     let out = child(&["describe", "arg"])
         .run(
             &[],
-            Some("stdin"),
+            Some("stdin".as_bytes()),
             Some(dir.path()),
             &Cancellation::default(),
         )
@@ -40,7 +40,7 @@ fn run_returns_stdout_and_passes_argv_input_and_cwd() {
 fn large_input_and_output_do_not_deadlock() {
     let input = "x".repeat(4 << 20);
     let out = child(&["cat"])
-        .run(&[], Some(&input), None, &Cancellation::default())
+        .run(&[], Some(input.as_bytes()), None, &Cancellation::default())
         .unwrap();
     assert_eq!(out, input);
 }
@@ -229,9 +229,40 @@ fn argv_must_not_be_empty() {
 #[test]
 fn input_is_passed_unchanged() {
     let out = child(&["bytes"])
-        .run(&[], Some("a\nb\r\n"), None, &Cancellation::default())
+        .run(
+            &[],
+            Some("a\nb\r\n".as_bytes()),
+            None,
+            &Cancellation::default(),
+        )
         .unwrap();
     assert_eq!(out, format!("{:?}", b"a\nb\r\n"));
+}
+
+#[test]
+fn input_need_not_be_text() {
+    let out = child(&["bytes"])
+        .run(
+            &[],
+            Some(&[0xff, 0xfe, 0x00]),
+            None,
+            &Cancellation::default(),
+        )
+        .unwrap();
+    assert_eq!(out, "[255, 254, 0]");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_process_left_running_survives_without_holding_up_the_call() {
+    let grandchild = Grandchild::new();
+    let started = Instant::now();
+    child(&["spawn-and-exit", grandchild.dir()])
+        .leave_running()
+        .run(&[], None, None, &Cancellation::default())
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    grandchild.assert_survived();
 }
 
 #[test]

@@ -8,7 +8,7 @@ typeset -gaU ncli_captured
 typeset -ga _ncli_separators=(';' '|' '||' '&' '&&' '|&' '&!' '&|')
 
 _ncli_preexec() {
-  local -a words=(${(z)1})
+  local -a words=(${(z)3})
   local -a separators=(${words:*_ncli_separators})
   (( $#separators )) && return
   local word fd

@@ -250,6 +250,8 @@ pub struct Cli {
     attempts: u32,
     retry_delay: Duration,
     tracer: Box<dyn Tracer>,
+    #[cfg(unix)]
+    leave_running: bool,
 }
 
 impl Cli {
@@ -262,6 +264,8 @@ impl Cli {
             attempts: 1,
             retry_delay: Duration::ZERO,
             tracer: Box::new(SilentTracer),
+            #[cfg(unix)]
+            leave_running: false,
         }
     }
 
@@ -291,6 +295,26 @@ impl Cli {
         }
     }
 
+    // For a command that must leave a process running, such as a clipboard owner. That process would
+    // hold the output pipes open, so the output is discarded.
+    #[cfg(unix)]
+    pub fn leave_running(self) -> Self {
+        Self {
+            leave_running: true,
+            ..self
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn(&self, command: std::process::Command, piped_stdin: bool) -> io::Result<sys::Process> {
+        sys::Process::spawn(command, piped_stdin, self.leave_running)
+    }
+
+    #[cfg(windows)]
+    fn spawn(&self, command: std::process::Command, piped_stdin: bool) -> io::Result<sys::Process> {
+        sys::Process::spawn(command, piped_stdin)
+    }
+
     pub fn executable(&self) -> &OsStr {
         &self.argv[0]
     }
@@ -298,7 +322,7 @@ impl Cli {
     pub fn run(
         &self,
         args: &[OsString],
-        input: Option<&str>,
+        input: Option<&[u8]>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
@@ -329,7 +353,7 @@ impl Cli {
     fn attempt(
         &self,
         call: &Call,
-        input: Option<&str>,
+        input: Option<&[u8]>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
@@ -353,7 +377,7 @@ impl Cli {
     fn execute(
         &self,
         call: &Call,
-        input: Option<&str>,
+        input: Option<&[u8]>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<Outcome, ProcessError> {
@@ -369,12 +393,12 @@ impl Cli {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        let mut process = sys::Process::spawn(command, input.is_some()).map_err(|source| {
-            ProcessError::Spawn {
-                name: name(),
-                source,
-            }
-        })?;
+        let mut process =
+            self.spawn(command, input.is_some())
+                .map_err(|source| ProcessError::Spawn {
+                    name: name(),
+                    source,
+                })?;
         let registration = cancellation.register(process.group());
         let communicated = process.communicate(input, self.timeout);
         drop(registration);

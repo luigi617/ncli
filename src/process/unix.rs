@@ -11,18 +11,26 @@ use super::{Communicated, WAIT_DELAY};
 pub struct Process {
     child: Child,
     group: Arc<Group>,
+    leave_running: bool,
 }
 
 impl Process {
-    pub fn spawn(mut command: Command, piped_stdin: bool) -> io::Result<Self> {
+    pub fn spawn(mut command: Command, piped_stdin: bool, leave_running: bool) -> io::Result<Self> {
+        let output = || {
+            if leave_running {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            }
+        };
         command
             .stdin(if piped_stdin {
                 Stdio::piped()
             } else {
                 Stdio::null()
             })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(output())
+            .stderr(output());
         // A new session detaches the child from ncli's terminal, so a terminal prompt fails
         // instead of stopping the child until the timeout.
         unsafe {
@@ -35,7 +43,11 @@ impl Process {
         }
         let child = command.spawn()?;
         let group = Arc::new(Group::new(&child)?);
-        Ok(Self { child, group })
+        Ok(Self {
+            child,
+            group,
+            leave_running,
+        })
     }
 
     pub fn group(&self) -> Arc<Group> {
@@ -44,21 +56,21 @@ impl Process {
 
     pub fn communicate(
         &mut self,
-        input: Option<&str>,
+        input: Option<&[u8]>,
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
         let group = &*self.group;
-        let mut pipes = Pipes::new(&mut self.child, input.unwrap_or_default().as_bytes())
-            .inspect_err(|_| group.kill())?;
+        let mut pipes =
+            Pipes::new(&mut self.child, input.unwrap_or_default()).inspect_err(|_| group.kill())?;
         let (exit_reader, exit_writer) = io::pipe().inspect_err(|_| group.kill())?;
-        let child = &self.child;
+        let (child, kill_on_exit) = (&self.child, !self.leave_running);
         thread::scope(|scope| {
             let waiter = scope.spawn(move || {
                 let result = wait_for_exit(child);
                 drop(exit_writer);
                 result
             });
-            let pumped = pipes.pump(&exit_reader, group, timeout);
+            let pumped = pipes.pump(&exit_reader, group, timeout, kill_on_exit);
             if pumped.is_err() {
                 group.kill();
             }
@@ -125,10 +137,12 @@ struct Output<P> {
 }
 
 impl<P: Read + AsRawFd> Output<P> {
-    fn new(pipe: P) -> io::Result<Self> {
-        set_nonblocking(&pipe)?;
+    fn new(pipe: Option<P>) -> io::Result<Self> {
+        if let Some(pipe) = &pipe {
+            set_nonblocking(pipe)?;
+        }
         Ok(Self {
-            pipe: Some(pipe),
+            pipe,
             output: Vec::new(),
         })
     }
@@ -169,8 +183,8 @@ impl<'a> Pipes<'a> {
         Ok(Self {
             stdin,
             input,
-            stdout: Output::new(child.stdout.take().expect("stdout is piped"))?,
-            stderr: Output::new(child.stderr.take().expect("stderr is piped"))?,
+            stdout: Output::new(child.stdout.take())?,
+            stderr: Output::new(child.stderr.take())?,
         })
     }
 
@@ -179,6 +193,7 @@ impl<'a> Pipes<'a> {
         exit: &PipeReader,
         group: &Group,
         timeout: Option<Duration>,
+        kill_on_exit: bool,
     ) -> io::Result<(bool, bool)> {
         let mut deadline = timeout.map(|timeout| Instant::now() + timeout);
         let (mut exited, mut timed_out) = (false, false);
@@ -210,7 +225,9 @@ impl<'a> Pipes<'a> {
             poll(&mut fds, deadline)?;
             if !exited && fds[0].revents != 0 {
                 exited = true;
-                group.kill();
+                if kill_on_exit {
+                    group.kill();
+                }
                 self.stdin = None;
                 deadline = Some(Instant::now() + WAIT_DELAY);
             }

@@ -13,6 +13,7 @@ pub enum Entry {
     Review,
     Terminal,
     Recording,
+    Failure,
 }
 
 impl Entry {
@@ -22,6 +23,7 @@ impl Entry {
             Self::Review => "review.json",
             Self::Terminal => "terminal.txt",
             Self::Recording => "recording.txt",
+            Self::Failure => "failure.txt",
         }
     }
 }
@@ -33,6 +35,7 @@ impl fmt::Display for Entry {
             Self::Review => "review",
             Self::Terminal => "terminal output",
             Self::Recording => "recording",
+            Self::Failure => "failure",
         })
     }
 }
@@ -85,7 +88,20 @@ pub fn load(entry: Entry) -> Result<Option<Vec<u8>>, Error> {
 }
 
 pub fn last_output() -> Result<String, Error> {
-    let entry = match newest(&[Entry::Output, Entry::Terminal, Entry::Recording])? {
+    newest_output(&[
+        Entry::Output,
+        Entry::Terminal,
+        Entry::Recording,
+        Entry::Failure,
+    ])
+}
+
+pub fn last_successful_output() -> Result<String, Error> {
+    newest_output(&[Entry::Output, Entry::Terminal, Entry::Recording])
+}
+
+fn newest_output(entries: &[Entry]) -> Result<String, Error> {
+    let entry = match newest(entries)? {
         Some(Entry::Recording) => {
             let partial = load(Entry::Recording)?.unwrap_or_default();
             if Path::new(String::from_utf8_lossy(&partial).trim_end()).exists() {

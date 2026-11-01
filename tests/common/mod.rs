@@ -140,6 +140,14 @@ impl Grandchild {
         }
     }
 
+    pub fn assert_survived(&self) {
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            self.dir.path().join("survived").exists(),
+            "the grandchild was killed"
+        );
+    }
+
     pub fn assert_killed(&self) {
         std::thread::sleep(Duration::from_secs(3));
         assert!(

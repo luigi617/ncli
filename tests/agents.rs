@@ -178,6 +178,11 @@ case "$prompt" in
 esac
 "#;
 
+    #[cfg(target_os = "macos")]
+    const CLIPBOARD: &str = "pbcopy";
+    #[cfg(not(target_os = "macos"))]
+    const CLIPBOARD: &str = "wl-copy";
+
     const FAKE_CLIPBOARD: &str = "#!/bin/sh\ncat > \"$NCLI_TEST_LOG/clipboard\"\n";
 
     struct Env {
@@ -196,7 +201,7 @@ esac
                 work: TempDir::new().unwrap(),
             };
             for name in installed {
-                let body = if *name == "pbcopy" {
+                let body = if ["pbcopy", "wl-copy", "xclip", "xsel"].contains(name) {
                     FAKE_CLIPBOARD
                 } else {
                     FAKE_AGENT
@@ -215,7 +220,8 @@ esac
                     "PATH",
                     format!("{}:/bin:/usr/bin", self.bin.path().display()),
                 )
-                .env("NCLI_TEST_LOG", self.log.path());
+                .env("NCLI_TEST_LOG", self.log.path())
+                .env("WAYLAND_DISPLAY", "ncli-test");
             command
         }
 
@@ -367,18 +373,18 @@ esac
             assert_eq!(output.status.signal(), Some(libc::SIGINT));
             let expected = format!("ncli: error: {installed} was cancelled\nResume: {resume}");
             assert!(stderr(&output).contains(&expected), "{}", stderr(&output));
-            let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
+            let saved = fs::read_to_string(env.state.path().join("failure.txt")).unwrap();
             assert!(saved.starts_with(&expected), "{saved}");
         }
     }
 
     #[test]
-    fn a_failed_task_replaces_the_last_output_but_a_failed_copy_or_a_typo_does_not() {
+    fn a_failure_is_recorded_apart_from_the_last_successful_output() {
         let env = Env::new(&["claude"]);
-        let saved = || fs::read_to_string(env.state.path().join("output.txt")).ok();
+        let saved = || fs::read_to_string(env.state.path().join("failure.txt")).ok();
         env.run(&["copy"]);
         assert_eq!(saved(), None);
-        env.succeed(&["fix the bug"]);
+        let succeeded = env.succeed(&["fix the bug"]);
         let output = env
             .ncli(&["fix the bug"])
             .env("FAKE_COMPLETED", "false")
@@ -390,6 +396,13 @@ esac
         env.run(&["copy"]);
         env.run(&["cpy"]);
         assert_eq!(saved().unwrap(), error);
+
+        env.succeed(&["code", "address-comment"]);
+        let prompt = env.logged("claude.prompt").unwrap();
+        assert!(
+            prompt.contains(&format!("<output>\n{succeeded}</output>")),
+            "{prompt}"
+        );
     }
 
     #[test]
@@ -475,6 +488,7 @@ esac
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(prompt.contains(LINK));
         assert!(prompt.contains("<context>\nonly the typos\n</context>"));
+        assert!(prompt.contains("skip any that is already posted on the change"));
         assert!(prompt.contains(
             "File: README.md\nLine: 1\nBody:\n\n### 🟡 Low: Typo\n`README.md:1`\nA word is misspelled.\n\
              **Fix:** Correct the spelling."
@@ -507,10 +521,9 @@ esac
         assert!(env.logged("claude.prompt").is_none());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn copy_puts_the_last_output_on_the_clipboard() {
-        let env = Env::new(&["claude", "pbcopy"]);
+        let env = Env::new(&["claude", CLIPBOARD]);
         let output = env.run(&["copy"]);
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert_eq!(
@@ -526,6 +539,17 @@ esac
                 printed.strip_suffix('\n').unwrap()
             );
         }
+
+        env.ncli(&["fix the bug"])
+            .env("FAKE_COMPLETED", "false")
+            .output()
+            .unwrap();
+        env.succeed(&["copy"]);
+        assert!(
+            env.logged("clipboard")
+                .unwrap()
+                .starts_with("ncli: error: claude could not finish the task: ")
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -546,6 +570,10 @@ esac
             "printf 'not recorded\\n'".to_owned(),
             format!("{ncli} copy"),
             r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/first""#.to_owned(),
+            "alias say='sh -c'".to_owned(),
+            "say 'echo aliased'".to_owned(),
+            format!("{ncli} copy"),
+            r#"cp "$NCLI_TEST_LOG/clipboard" "$NCLI_TEST_LOG/aliased""#.to_owned(),
             "sh -c 'echo early; (sleep 3; echo late) &'".to_owned(),
             format!(r#"{ncli} copy 2> "$NCLI_TEST_LOG/still""#),
             "sleep 3".to_owned(),
@@ -580,6 +608,7 @@ esac
             env.logged("still").unwrap().trim(),
             "ncli copy: error: the output of the last command is still being recorded"
         );
+        assert_eq!(env.logged("aliased").unwrap(), "aliased\n");
         assert_eq!(env.logged("late").unwrap(), "early\nlate\n");
         {
             use std::os::unix::fs::PermissionsExt;
@@ -595,12 +624,30 @@ esac
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn copy_is_unsupported_off_macos() {
-        let output = Env::new(&[]).run(&["copy"]);
+    fn copy_uses_the_clipboard_of_the_running_display() {
+        let env = Env::new(&["claude", "wl-copy", "xclip"]);
+        let printed = env.succeed(&["fix the bug"]);
+        let copy = |display: Option<&str>| {
+            let mut copy = env.ncli(&["copy"]);
+            copy.env_remove("WAYLAND_DISPLAY").env_remove("DISPLAY");
+            if let Some(display) = display {
+                copy.env(display, "ncli-test");
+            }
+            copy.output().unwrap()
+        };
+        let output = copy(None);
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert_eq!(
             stderr(&output).trim(),
-            "ncli copy: error: copying to the clipboard is not supported on this platform"
+            "ncli copy: error: there is no display to copy to; set WAYLAND_DISPLAY or DISPLAY"
         );
+        for display in ["WAYLAND_DISPLAY", "DISPLAY"] {
+            fs::remove_file(env.log.path().join("clipboard")).ok();
+            assert!(copy(Some(display)).status.success(), "{display}");
+            assert_eq!(
+                env.logged("clipboard").unwrap(),
+                printed.strip_suffix('\n').unwrap()
+            );
+        }
     }
 }
