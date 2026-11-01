@@ -103,6 +103,32 @@ fn main() -> ExitCode {
         ["verdict", dir, verdict, "--schema-file", path] => {
             answer_verdict(dir, verdict, &fs::read_to_string(path).unwrap());
         }
+        ["perform", answer, "--session", _, "--schema", _] => print!("{answer}"),
+        ["perform", answer, "--json", "--schema", _] => {
+            let message = |text: &str| serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": text}});
+            println!(
+                "{}",
+                serde_json::json!({"type": "thread.started", "thread_id": "thread-1"})
+            );
+            println!("{}", message("Working on it."));
+            println!(
+                "{}",
+                serde_json::json!({"type": "item.completed", "item": {"type": "reasoning"}})
+            );
+            println!("{}", message(answer));
+            println!("{}", serde_json::json!({"type": "turn.completed"}));
+        }
+        ["perform-anonymously", answer, "--json", "--schema", _] => println!(
+            "{}",
+            serde_json::json!({"type": "item.completed", "item": {"type": "agent_message", "text": answer}})
+        ),
+        ["start-and-fail", "--json", "--schema", _] => {
+            println!(
+                "{}",
+                serde_json::json!({"type": "thread.started", "thread_id": "thread-1"})
+            );
+            return ExitCode::FAILURE;
+        }
         ["sleep", seconds] => sleep(seconds),
         #[cfg(unix)]
         ["session"] => {

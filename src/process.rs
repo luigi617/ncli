@@ -32,24 +32,44 @@ pub enum ProcessError {
     #[error("{name} failed: {source}")]
     Io { name: String, source: io::Error },
     #[error("{name} timed out after {}s", .timeout.as_secs_f64())]
-    Timeout { name: String, timeout: Duration },
+    Timeout {
+        name: String,
+        timeout: Duration,
+        stdout: String,
+    },
     #[error("{name} was cancelled")]
-    Cancelled { name: String },
+    Cancelled { name: String, stdout: String },
     #[error("{name} exited, but a process it started kept its output open")]
-    OutputHeldOpen { name: String },
+    OutputHeldOpen { name: String, stdout: String },
     #[error("{name} was killed by signal {signal}")]
-    Signal { name: String, signal: i32 },
+    Signal {
+        name: String,
+        signal: i32,
+        stdout: String,
+    },
     #[error("{name} exited with code {code}{}", detail(.stderr_tail))]
     Exit {
         name: String,
         code: i32,
         stderr_tail: String,
+        stdout: String,
     },
 }
 
 impl ProcessError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Exit { .. })
+    }
+
+    pub fn stdout(&self) -> &str {
+        match self {
+            Self::Spawn { .. } | Self::Io { .. } => "",
+            Self::Timeout { stdout, .. }
+            | Self::Cancelled { stdout, .. }
+            | Self::OutputHeldOpen { stdout, .. }
+            | Self::Signal { stdout, .. }
+            | Self::Exit { stdout, .. } => stdout,
+        }
     }
 }
 
@@ -64,6 +84,10 @@ fn detail(stderr_tail: &str) -> String {
 #[derive(Debug, thiserror::Error)]
 #[error("required executables not found on PATH: {}", join_lossy(.0))]
 pub struct MissingExecutables(pub Vec<OsString>);
+
+#[derive(Debug, thiserror::Error)]
+#[error("none of these executables were found on PATH: {}", join_lossy(.0))]
+pub struct NoExecutable(pub Vec<OsString>);
 
 fn join_lossy(names: &[OsString]) -> String {
     names
@@ -92,6 +116,20 @@ pub fn require_executables<'a>(
     } else {
         Err(MissingExecutables(missing))
     }
+}
+
+pub fn first_available<T>(
+    candidates: impl IntoIterator<Item = T>,
+    executable: impl Fn(&T) -> &OsStr,
+) -> Result<T, NoExecutable> {
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        if which::which(executable(&candidate)).is_ok() {
+            return Ok(candidate);
+        }
+        tried.push(executable(&candidate).to_owned());
+    }
+    Err(NoExecutable(tried))
 }
 
 pub struct Call<'a> {
@@ -176,15 +214,20 @@ impl Tracer for StderrTracer {
     }
 }
 
-fn failure(call: &Call, outcome: &Outcome) -> ProcessError {
+fn failure(call: &Call, outcome: Outcome) -> ProcessError {
     let name = call.name().into_owned();
     if let Some(signal) = sys::signal(outcome.status) {
-        return ProcessError::Signal { name, signal };
+        return ProcessError::Signal {
+            name,
+            signal,
+            stdout: outcome.stdout,
+        };
     }
     ProcessError::Exit {
         name,
         code: outcome.returncode(),
         stderr_tail: last_lines(&outcome.stderr),
+        stdout: outcome.stdout,
     }
 }
 
@@ -207,6 +250,8 @@ pub struct Cli {
     attempts: u32,
     retry_delay: Duration,
     tracer: Box<dyn Tracer>,
+    #[cfg(unix)]
+    leave_running: bool,
 }
 
 impl Cli {
@@ -219,6 +264,8 @@ impl Cli {
             attempts: 1,
             retry_delay: Duration::ZERO,
             tracer: Box::new(SilentTracer),
+            #[cfg(unix)]
+            leave_running: false,
         }
     }
 
@@ -248,6 +295,26 @@ impl Cli {
         }
     }
 
+    // For a command that must leave a process running, such as a clipboard owner. That process would
+    // hold the output pipes open, so the output is discarded.
+    #[cfg(unix)]
+    pub fn leave_running(self) -> Self {
+        Self {
+            leave_running: true,
+            ..self
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn(&self, command: std::process::Command, piped_stdin: bool) -> io::Result<sys::Process> {
+        sys::Process::spawn(command, piped_stdin, self.leave_running)
+    }
+
+    #[cfg(windows)]
+    fn spawn(&self, command: std::process::Command, piped_stdin: bool) -> io::Result<sys::Process> {
+        sys::Process::spawn(command, piped_stdin)
+    }
+
     pub fn executable(&self) -> &OsStr {
         &self.argv[0]
     }
@@ -255,7 +322,7 @@ impl Cli {
     pub fn run(
         &self,
         args: &[OsString],
-        input: Option<&str>,
+        input: Option<&[u8]>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
@@ -273,6 +340,7 @@ impl Cli {
                     if cancellation.sleep(self.retry_delay) {
                         return Err(ProcessError::Cancelled {
                             name: call.name().into_owned(),
+                            stdout: error.stdout().to_owned(),
                         });
                     }
                 }
@@ -285,7 +353,7 @@ impl Cli {
     fn attempt(
         &self,
         call: &Call,
-        input: Option<&str>,
+        input: Option<&[u8]>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
@@ -297,7 +365,7 @@ impl Cli {
                 if outcome.status.success() {
                     Ok(outcome.stdout)
                 } else {
-                    Err(failure(call, &outcome))
+                    Err(failure(call, outcome))
                 }
             });
         if let Err(error) = &result {
@@ -309,7 +377,7 @@ impl Cli {
     fn execute(
         &self,
         call: &Call,
-        input: Option<&str>,
+        input: Option<&[u8]>,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<Outcome, ProcessError> {
@@ -325,32 +393,40 @@ impl Cli {
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
-        let mut process = sys::Process::spawn(command, input.is_some()).map_err(|source| {
-            ProcessError::Spawn {
-                name: name(),
-                source,
-            }
-        })?;
+        let mut process =
+            self.spawn(command, input.is_some())
+                .map_err(|source| ProcessError::Spawn {
+                    name: name(),
+                    source,
+                })?;
         let registration = cancellation.register(process.group());
         let communicated = process.communicate(input, self.timeout);
         drop(registration);
         let status = process.wait().map_err(io_error)?;
         let communicated = communicated.map_err(io_error)?;
+        let stdout = universal_newlines(&communicated.stdout);
         if communicated.timed_out {
             return Err(ProcessError::Timeout {
                 name: name(),
                 timeout: self.timeout.expect("only a timeout stops the wait early"),
+                stdout,
             });
         }
         if cancellation.is_cancelled() {
-            return Err(ProcessError::Cancelled { name: name() });
+            return Err(ProcessError::Cancelled {
+                name: name(),
+                stdout,
+            });
         }
         if status.success() && !communicated.output_closed {
-            return Err(ProcessError::OutputHeldOpen { name: name() });
+            return Err(ProcessError::OutputHeldOpen {
+                name: name(),
+                stdout,
+            });
         }
         Ok(Outcome {
             status,
-            stdout: universal_newlines(&communicated.stdout),
+            stdout,
             stderr: universal_newlines(&communicated.stderr),
             duration: start.elapsed(),
         })

@@ -77,7 +77,7 @@ impl Process {
 
     pub fn communicate(
         &mut self,
-        input: Option<&str>,
+        input: Option<&[u8]>,
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
         let mut stdout = self.stdout.take().expect("communicate runs once");
@@ -176,8 +176,8 @@ fn read(pipe: &mut File, stop: &AtomicBool) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
-fn write(pipe: &mut File, input: &str, stop: &AtomicBool) -> io::Result<()> {
-    match pipe.write_all(input.as_bytes()) {
+fn write(pipe: &mut File, input: &[u8], stop: &AtomicBool) -> io::Result<()> {
+    match pipe.write_all(input) {
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe || stop.load(Ordering::SeqCst) => {
             Ok(())
         }

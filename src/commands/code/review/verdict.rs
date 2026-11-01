@@ -2,23 +2,20 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::LazyLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-// Kept on one line: Windows cannot pass an argument containing a newline to a batch-file shim.
-pub static SCHEMA: LazyLock<String> = LazyLock::new(|| {
-    serde_json::from_str::<serde_json::Value>(include_str!("verdict.schema.json"))
-        .expect("the verdict schema is valid JSON")
-        .to_string()
-});
+use crate::agent::schema;
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+pub static SCHEMA: LazyLock<String> = LazyLock::new(|| schema(include_str!("verdict.schema.json")));
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Verdict {
     pub change_accessed: bool,
     pub findings: Vec<Finding>,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Finding {
     pub severity: Severity,
@@ -29,7 +26,7 @@ pub struct Finding {
     pub fix: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     High,

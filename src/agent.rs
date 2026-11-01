@@ -1,0 +1,293 @@
+use std::ffi::OsString;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::path::Path;
+use std::sync::LazyLock;
+
+use clap::ValueEnum;
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::error::Error;
+use crate::process::{self, Cancellation, Cli, NoExecutable, ProcessError, StderrTracer};
+
+pub static TASK_SCHEMA: LazyLock<String> =
+    LazyLock::new(|| schema(include_str!("agent/task.schema.json")));
+
+// Kept on one line: Windows cannot pass an argument containing a newline to a batch-file shim.
+pub fn schema(json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(json)
+        .expect("the schema is valid JSON")
+        .to_string()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum AgentKind {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl AgentKind {
+    pub fn agent(self) -> Agent {
+        let (argv, schema_arg, session, resume): (&[&str], _, _, _) = match self {
+            Self::Claude => (
+                &["claude", "--dangerously-skip-permissions", "--print"],
+                SchemaArg::Inline("--json-schema"),
+                Session::Assigned("--session-id"),
+                &["claude", "--resume"][..],
+            ),
+            Self::Codex => (
+                &[
+                    "codex",
+                    "exec",
+                    "--sandbox",
+                    "workspace-write",
+                    "--config",
+                    "sandbox_workspace_write.network_access=true",
+                    "--skip-git-repo-check",
+                ],
+                SchemaArg::File("--output-schema"),
+                Session::FromEvents("--json"),
+                &["codex", "resume"][..],
+            ),
+        };
+        let name = self.to_possible_value().expect("no agent kind is skipped");
+        Agent {
+            name: name.get_name().to_owned(),
+            cli: Cli::new(argv.iter().copied()).tracer(StderrTracer),
+            schema_arg,
+            session,
+            resume,
+        }
+    }
+
+    pub fn first_available() -> Result<Agent, NoExecutable> {
+        process::first_available(
+            Self::value_variants().iter().map(|kind| kind.agent()),
+            |agent| agent.cli.executable(),
+        )
+    }
+}
+
+pub enum SchemaArg {
+    Inline(&'static str),
+    File(&'static str),
+}
+
+impl SchemaArg {
+    fn args(&self, schema: &str, scratch: &Path) -> io::Result<Vec<OsString>> {
+        Ok(match self {
+            Self::Inline(flag) => vec![flag.into(), schema.into()],
+            Self::File(flag) => {
+                let path = scratch.join("schema.json");
+                fs::write(&path, schema)?;
+                vec![flag.into(), path.into()]
+            }
+        })
+    }
+}
+
+pub enum Session {
+    Assigned(&'static str),
+    FromEvents(&'static str),
+}
+
+impl Session {
+    fn start(&self) -> (Vec<OsString>, Option<String>) {
+        match self {
+            Self::Assigned(flag) => {
+                let id = Uuid::new_v4().to_string();
+                (vec![flag.into(), id.clone().into()], Some(id))
+            }
+            Self::FromEvents(flag) => (vec![flag.into()], None),
+        }
+    }
+
+    fn read(&self, assigned: Option<String>, output: &str) -> (Option<String>, String) {
+        match self {
+            Self::Assigned(_) => (assigned, output.to_owned()),
+            Self::FromEvents(_) => {
+                let (mut id, mut answer) = (None, String::new());
+                for event in output
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                {
+                    match event {
+                        Event::ThreadStarted { thread_id } => id = Some(thread_id),
+                        Event::ItemCompleted {
+                            item: Item::AgentMessage { text },
+                        } => answer = text,
+                        _ => {}
+                    }
+                }
+                (id, answer)
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum Event {
+    #[serde(rename = "thread.started")]
+    ThreadStarted { thread_id: String },
+    #[serde(rename = "item.completed")]
+    ItemCompleted { item: Item },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum Item {
+    #[serde(rename = "agent_message")]
+    AgentMessage { text: String },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Outcome {
+    completed: bool,
+    report: String,
+}
+
+pub struct Performed {
+    pub report: String,
+    pub resume: String,
+}
+
+impl fmt::Display for Performed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}\n\nResume: {}", self.report.trim(), self.resume)
+    }
+}
+
+pub struct Agent {
+    pub name: String,
+    pub cli: Cli,
+    pub schema_arg: SchemaArg,
+    pub session: Session,
+    pub resume: &'static [&'static str],
+}
+
+impl Agent {
+    pub fn ask(
+        &self,
+        prompt: &str,
+        schema: Option<&str>,
+        cwd: Option<&Path>,
+        cancellation: &Cancellation,
+    ) -> Result<String, Error> {
+        self.invoke(Vec::new(), prompt, schema, cwd, cancellation)
+    }
+
+    pub fn perform(&self, task: &str, cancellation: &Cancellation) -> Result<Performed, Error> {
+        let (answer, id) = self.attempt(task, None, cancellation);
+        let Some(id) = id else {
+            answer?;
+            return Err(Error::NoSession(self.name.clone()));
+        };
+        let resume = self
+            .resume
+            .iter()
+            .copied()
+            .chain([id.as_str()])
+            .collect::<Vec<_>>()
+            .join(" ");
+        let report = answer
+            .and_then(|answer| self.outcome(answer))
+            .map_err(|source| Error::Resumable {
+                source: Box::new(source),
+                resume: resume.clone(),
+            })?;
+        Ok(Performed { report, resume })
+    }
+
+    // Starts in an empty directory instead of the user's, which limits only where the agent works by
+    // default, not what it can reach. Its session cannot be resumed: agents keep sessions per
+    // directory, and this one is removed afterwards.
+    pub fn perform_isolated(
+        &self,
+        task: &str,
+        cancellation: &Cancellation,
+    ) -> Result<String, Error> {
+        let workdir = tempfile::Builder::new()
+            .prefix("ncli-")
+            .tempdir()
+            .map_err(Error::WorkingDirectory)?;
+        self.attempt(task, Some(workdir.path()), cancellation)
+            .0
+            .and_then(|answer| self.outcome(answer))
+    }
+
+    fn attempt(
+        &self,
+        task: &str,
+        cwd: Option<&Path>,
+        cancellation: &Cancellation,
+    ) -> (Result<String, Error>, Option<String>) {
+        let prompt = format!(
+            "{task}\n\n\
+             When you are done, answer as JSON matching the given schema. Set completed to false if \
+             you could not finish the task, and put in report the answer, or what you did and why."
+        );
+        let (args, assigned) = self.session.start();
+        let result = self.invoke(args, &prompt, Some(&TASK_SCHEMA), cwd, cancellation);
+        let ran = match &result {
+            Ok(output) => Some(output.as_str()),
+            Err(Error::Process(error)) if !matches!(error, ProcessError::Spawn { .. }) => {
+                Some(error.stdout())
+            }
+            Err(_) => None,
+        };
+        let (id, answer) = ran.map_or((None, String::new()), |output| {
+            self.session.read(assigned, output)
+        });
+        (result.map(|_| answer), id)
+    }
+
+    fn outcome(&self, answer: String) -> Result<String, Error> {
+        let outcome: Outcome =
+            serde_json::from_str(&answer).map_err(|source| Error::InvalidAnswer {
+                agent: self.name.clone(),
+                source,
+                output: answer,
+            })?;
+        if outcome.completed {
+            Ok(outcome.report)
+        } else {
+            Err(Error::Incomplete {
+                agent: self.name.clone(),
+                report: outcome.report,
+            })
+        }
+    }
+
+    fn invoke(
+        &self,
+        mut args: Vec<OsString>,
+        prompt: &str,
+        schema: Option<&str>,
+        cwd: Option<&Path>,
+        cancellation: &Cancellation,
+    ) -> Result<String, Error> {
+        let scratch = tempfile::Builder::new()
+            .prefix("ncli-")
+            .tempdir()
+            .map_err(Error::WorkingDirectory)?;
+        if let Some(schema) = schema {
+            args.extend(
+                self.schema_arg
+                    .args(schema, scratch.path())
+                    .map_err(Error::WorkingDirectory)?,
+            );
+        }
+        Ok(self
+            .cli
+            .run(&args, Some(prompt.as_bytes()), cwd, cancellation)?)
+    }
+}

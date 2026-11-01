@@ -1,26 +1,29 @@
 mod common;
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use common::install;
 use ncli::error::Error;
 use tempfile::TempDir;
 
-fn ncli(args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ncli"));
-    command.args(args);
-    command
+fn run(args: &[&str]) -> Output {
+    let state = TempDir::new().unwrap();
+    common::ncli(state.path()).args(args).output().unwrap()
 }
 
 fn with_path(args: &[&str], installed: &[&str]) -> Output {
-    let dir = TempDir::new().unwrap();
+    let (dir, state) = (TempDir::new().unwrap(), TempDir::new().unwrap());
     install(dir.path(), installed);
-    ncli(args).env("PATH", dir.path()).output().unwrap()
+    common::ncli(state.path())
+        .args(args)
+        .env("PATH", dir.path())
+        .output()
+        .unwrap()
 }
 
 #[test]
 fn version_prints_and_exits_zero() {
-    let output = ncli(&["--version"]).output().unwrap();
+    let output = run(&["--version"]);
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
@@ -32,18 +35,18 @@ fn version_prints_and_exits_zero() {
 fn usage_errors_exit_two() {
     for args in [
         &[][..],
-        &["nope"],
+        &["--nope"],
         &["code"],
+        &["code", "nope"],
+        &["code", "address-comment", "owner/repo#1"],
+        &["code", "address-comment", "--context", ""],
+        &["code", "publish-comment", "--context", ""],
         &["code", "review"],
         &["code", "review", "owner/repo#1"],
         &["code", "review", "https://"],
         &["code", "review", "ftp://example.com/pr/1"],
     ] {
-        assert_eq!(
-            ncli(args).output().unwrap().status.code(),
-            Some(2),
-            "{args:?}"
-        );
+        assert_eq!(run(args).status.code(), Some(2), "{args:?}");
     }
 }
 

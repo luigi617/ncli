@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use std::{env, fs};
@@ -53,6 +54,12 @@ pub fn events(expected: &[(&str, u32)]) -> Vec<(String, u32)> {
         .iter()
         .map(|(event, attempt)| (event.to_string(), *attempt))
         .collect()
+}
+
+pub fn ncli(state: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ncli"));
+    command.env(ncli::state::DIR_VAR, state);
+    command
 }
 
 pub const CHILD: &str = env!("CARGO_BIN_EXE_ncli-test-child");
@@ -131,6 +138,14 @@ impl Grandchild {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    pub fn assert_survived(&self) {
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            self.dir.path().join("survived").exists(),
+            "the grandchild was killed"
+        );
     }
 
     pub fn assert_killed(&self) {
