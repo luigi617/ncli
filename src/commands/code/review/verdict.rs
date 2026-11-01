@@ -5,15 +5,11 @@ use std::sync::LazyLock;
 use serde::Deserialize;
 
 // Kept on one line: Windows cannot pass an argument containing a newline to a batch-file shim.
-static SCHEMA: LazyLock<String> = LazyLock::new(|| {
+pub static SCHEMA: LazyLock<String> = LazyLock::new(|| {
     serde_json::from_str::<serde_json::Value>(include_str!("verdict.schema.json"))
         .expect("the verdict schema is valid JSON")
         .to_string()
 });
-
-pub fn schema() -> &'static str {
-    &SCHEMA
-}
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]

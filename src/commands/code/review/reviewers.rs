@@ -76,20 +76,7 @@ pub struct Reviewer {
 }
 
 impl Reviewer {
-    pub fn ask(&self, prompt: &str, cancellation: &Cancellation) -> Result<String, Error> {
-        self.call(prompt, None, cancellation)
-    }
-
-    pub fn ask_structured(
-        &self,
-        prompt: &str,
-        schema: &str,
-        cancellation: &Cancellation,
-    ) -> Result<String, Error> {
-        self.call(prompt, Some(schema), cancellation)
-    }
-
-    fn call(
+    pub fn ask(
         &self,
         prompt: &str,
         schema: Option<&str>,

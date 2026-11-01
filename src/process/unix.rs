@@ -1,5 +1,5 @@
 use std::io::{self, PipeReader, Read, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
@@ -208,39 +208,15 @@ impl<'a> Pipes<'a> {
                 fds.push(watch(pipe, libc::POLLOUT));
             }
             poll(&mut fds, deadline)?;
-            let ready = |fd: RawFd| {
-                fds.iter()
-                    .any(|polled| polled.fd == fd && polled.revents != 0)
-            };
-            if !exited && ready(exit.as_raw_fd()) {
+            if !exited && fds[0].revents != 0 {
                 exited = true;
                 group.kill();
                 self.stdin = None;
                 deadline = Some(Instant::now() + WAIT_DELAY);
             }
-            if self
-                .stdout
-                .pipe
-                .as_ref()
-                .is_some_and(|pipe| ready(pipe.as_raw_fd()))
-            {
-                self.stdout.read()?;
-            }
-            if self
-                .stderr
-                .pipe
-                .as_ref()
-                .is_some_and(|pipe| ready(pipe.as_raw_fd()))
-            {
-                self.stderr.read()?;
-            }
-            if self
-                .stdin
-                .as_ref()
-                .is_some_and(|pipe| ready(pipe.as_raw_fd()))
-            {
-                self.feed()?;
-            }
+            self.stdout.read()?;
+            self.stderr.read()?;
+            self.feed()?;
         }
     }
 

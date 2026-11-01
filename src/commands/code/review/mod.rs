@@ -9,7 +9,7 @@ use std::thread;
 use clap::{Args, ValueEnum};
 
 pub use reviewers::{Reviewer, ReviewerKind, SchemaArg};
-pub use verdict::{Report, Verdict, schema};
+pub use verdict::{Report, SCHEMA, Verdict};
 
 use crate::commands::Context;
 use crate::error::Error;
@@ -79,9 +79,9 @@ pub fn debate(
     })?;
     debate.extend(sections("Rebuttal", &rebuttals));
     progress(context, "verdict");
-    let verdict = judge.ask_structured(
+    let verdict = judge.ask(
         &prompts::judge(link, &transcript(&debate)),
-        verdict::schema(),
+        Some(&SCHEMA),
         context.cancellation,
     )?;
     let verdict = Verdict::parse(&verdict).map_err(|source| Error::Verdict {
@@ -133,7 +133,8 @@ fn ask_all<'a>(
                 let sender = sender.clone();
                 let (prompt_for, stage_cancellation) = (&prompt_for, &stage_cancellation);
                 scope.spawn(move || {
-                    let answer = reviewer.ask(&prompt_for(&reviewer.name), stage_cancellation);
+                    let answer =
+                        reviewer.ask(&prompt_for(&reviewer.name), None, stage_cancellation);
                     let _ = sender.send((index, answer));
                 })
             })

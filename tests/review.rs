@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use common::child;
 use ncli::commands::Context;
-use ncli::commands::code::review::{Reviewer, SchemaArg, Verdict, debate, schema};
+use ncli::commands::code::review::{Reviewer, SCHEMA, SchemaArg, Verdict, debate};
 use ncli::error::Error;
 use ncli::process::Cancellation;
 use tempfile::TempDir;
@@ -37,7 +37,7 @@ fn judge_received(dir: &Path, what: &str) -> String {
 fn assert_judge_received_the_schema(dir: &Path) {
     let received = judge_received(dir, "schema");
     assert!(!received.contains('\n'), "the schema must fit on one line");
-    assert_eq!(received, schema());
+    assert_eq!(received, *SCHEMA);
 }
 
 fn reviewers(dir: &Path) -> Vec<Reviewer> {
