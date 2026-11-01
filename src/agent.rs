@@ -15,6 +15,8 @@ use crate::process::{self, Cancellation, Cli, NoExecutable, ProcessError, Stderr
 
 pub const STYLE: &str = include_str!("agent/style.md");
 
+pub const WORKDIR: &str = "ncli-";
+
 pub static TASK_SCHEMA: LazyLock<String> =
     LazyLock::new(|| schema(include_str!("agent/task.schema.json")));
 
@@ -240,7 +242,7 @@ impl Agent {
         cancellation: &Cancellation,
     ) -> Result<String, Error> {
         let workdir = tempfile::Builder::new()
-            .prefix("ncli-")
+            .prefix(WORKDIR)
             .tempdir()
             .map_err(Error::WorkingDirectory)?;
         self.attempt(task, Some(workdir.path()), cancellation)
@@ -301,7 +303,7 @@ impl Agent {
         cancellation: &Cancellation,
     ) -> Result<String, Error> {
         let scratch = tempfile::Builder::new()
-            .prefix("ncli-")
+            .prefix(WORKDIR)
             .tempdir()
             .map_err(Error::WorkingDirectory)?;
         if let Some(schema) = schema {

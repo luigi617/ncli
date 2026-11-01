@@ -1,7 +1,7 @@
 use std::env;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader};
+use std::path::{self, Path, PathBuf};
 use std::time::SystemTime;
 
 use clap::{Args, ValueEnum};
@@ -9,8 +9,10 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 
+use serde::Deserialize;
+
 use super::{Context, Guidance};
-use crate::agent::AgentKind;
+use crate::agent::{AgentKind, WORKDIR};
 use crate::error::Error;
 
 /// Summarize what you did on a day, from your claude and codex sessions.
@@ -52,27 +54,89 @@ fn parse_day(day: &str) -> Result<Day, String> {
 impl Standup {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
         let agent = AgentKind::first_available()?;
-        let since = SystemTime::from(self.day.start);
+        let temp = fs::canonicalize(env::temp_dir()).map_err(Error::WorkingDirectory)?;
         let mut files = Vec::new();
         for sessions in AgentKind::value_variants()
             .iter()
             .filter_map(|kind| kind.sessions())
         {
-            modified_since(&sessions.dir, sessions.depth, since, &mut files).map_err(|source| {
-                Error::Sessions {
-                    dir: sessions.dir.clone(),
-                    source,
-                }
-            })?;
+            let unreadable = |source| Error::Sessions {
+                path: sessions.dir.clone(),
+                source,
+            };
+            let dir = path::absolute(&sessions.dir).map_err(unreadable)?;
+            let since = SystemTime::from(self.day.start);
+            modified_since(&dir, sessions.depth, since, &mut files).map_err(unreadable)?;
         }
-        if files.is_empty() {
+        let mut active = Vec::new();
+        for file in files {
+            let session = Session::read(&file, &self.day).map_err(|source| Error::Sessions {
+                path: file.clone(),
+                source,
+            })?;
+            if session.active && !session.ran_by_ncli(&temp) {
+                active.push(file);
+            }
+        }
+        if active.is_empty() {
             return Err(Error::NoSessions(self.day.date));
         }
-        files.sort();
-        let ncli = fs::canonicalize(env::temp_dir()).map_err(Error::WorkingDirectory)?;
-        context.progress(&format!("summarizing {}", sessions(files.len())));
-        let task = self.guidance.apply(prompt(&self.day, &files, &ncli));
+        active.sort();
+        context.progress(&format!("summarizing {}", sessions(active.len())));
+        let task = self.guidance.apply(prompt(&self.day, &active));
         agent.perform_isolated(&task, context.cancellation)
+    }
+}
+
+#[derive(Deserialize)]
+struct Line {
+    timestamp: Option<String>,
+    cwd: Option<PathBuf>,
+    payload: Option<Payload>,
+}
+
+#[derive(Deserialize)]
+struct Payload {
+    cwd: Option<PathBuf>,
+}
+
+struct Session {
+    active: bool,
+    cwd: Option<PathBuf>,
+}
+
+impl Session {
+    // Claude records the working directory on each entry, and codex in the payload of its first.
+    fn read(path: &Path, day: &Day) -> io::Result<Self> {
+        let mut session = Self {
+            active: false,
+            cwd: None,
+        };
+        for line in BufReader::new(File::open(path)?).split(b'\n') {
+            let Ok(line) = serde_json::from_slice::<Line>(&line?) else {
+                continue;
+            };
+            session.active |= line
+                .timestamp
+                .and_then(|time| time.parse::<Timestamp>().ok())
+                .is_some_and(|time| (day.start..day.end).contains(&time));
+            if session.cwd.is_none() {
+                session.cwd = line.cwd.or(line.payload.and_then(|payload| payload.cwd));
+            }
+            if session.active && session.cwd.is_some() {
+                break;
+            }
+        }
+        Ok(session)
+    }
+
+    fn ran_by_ncli(&self, temp: &Path) -> bool {
+        self.cwd.as_deref().is_some_and(|cwd| {
+            cwd.parent() == Some(temp)
+                && cwd
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(WORKDIR))
+        })
     }
 }
 
@@ -111,7 +175,7 @@ fn modified_since(
     Ok(())
 }
 
-fn prompt(day: &Day, files: &[PathBuf], ncli: &Path) -> String {
+fn prompt(day: &Day, files: &[PathBuf]) -> String {
     let files = files
         .iter()
         .map(|file| format!("- {}", file.display()))
@@ -122,9 +186,7 @@ fn prompt(day: &Day, files: &[PathBuf], ncli: &Path) -> String {
          \n\
          My claude and codex sessions are recorded as JSON Lines in the files below. Read them \
          yourself, and consider only entries whose timestamp is from {start} up to {end}, which \
-         is {date} in my time zone. Skip any session whose working directory is under {ncli}: \
-         ncli ran those itself, and they repeat work from the other sessions. Do not modify \
-         anything.\n\
+         is {date} in my time zone. Do not modify anything.\n\
          \n\
          {files}\n\
          \n\
@@ -135,6 +197,5 @@ fn prompt(day: &Day, files: &[PathBuf], ncli: &Path) -> String {
         date = day.date,
         start = day.start,
         end = day.end,
-        ncli = ncli.display(),
     )
 }
