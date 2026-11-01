@@ -23,17 +23,20 @@ impl AddressComment {
             None => given(&state::last_successful_output()?),
         };
         let agent = AgentKind::first_available()?;
-        let task = format!(
-            "{feedback} Before changing anything for a comment, verify it against the code. Address \
-             it only if it is correct and worth the change; leave the code as it is for any comment \
-             that is wrong, already handled, or not worth addressing. Do not commit, do not push, \
-             and do not reply to or resolve any comment. In report, say for each comment whether \
-             you addressed it, with the change you made, or skipped it, and why."
-        );
         Ok(agent
-            .perform(&self.guidance.apply(task), context.cancellation)?
+            .perform(&self.guidance.apply(task(&feedback)), context.cancellation)?
             .to_string())
     }
+}
+
+pub(super) fn task(feedback: &str) -> String {
+    format!(
+        "{feedback} Before changing anything for a comment, verify it against the code. Address \
+         it only if it is correct and worth the change; leave the code as it is for any comment \
+         that is wrong, already handled, or not worth addressing. Do not commit, do not push, \
+         and do not reply to or resolve any comment. In report, say for each comment whether \
+         you addressed it, with the change you made, or skipped it, and why."
+    )
 }
 
 fn linked(link: &str) -> String {

@@ -62,6 +62,19 @@ pub fn ncli(state: &Path) -> Command {
     command
 }
 
+pub fn git(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(["-c", "user.name=ncli", "-c", "user.email=ncli@example.com"])
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
 pub const CHILD: &str = env!("CARGO_BIN_EXE_ncli-test-child");
 
 pub fn child_name() -> &'static str {

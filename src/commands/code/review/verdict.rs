@@ -40,6 +40,14 @@ impl Verdict {
         verdict.findings.sort_by_key(|finding| finding.severity);
         Ok(verdict)
     }
+
+    pub fn count(&self) -> String {
+        match self.findings.len() {
+            0 => "no findings".to_owned(),
+            1 => "1 finding".to_owned(),
+            count => format!("{count} findings"),
+        }
+    }
 }
 
 pub struct Report<'a> {
@@ -49,14 +57,8 @@ pub struct Report<'a> {
 
 impl fmt::Display for Report<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let prog = self.prog;
-        let findings = &self.verdict.findings;
-        match findings.len() {
-            0 => return write!(f, "## {prog}: no findings"),
-            1 => write!(f, "## {prog}: 1 finding")?,
-            count => write!(f, "## {prog}: {count} findings")?,
-        }
-        for finding in findings {
+        write!(f, "## {}: {}", self.prog, self.verdict.count())?;
+        for finding in &self.verdict.findings {
             write!(f, "\n\n{finding}")?;
         }
         Ok(())

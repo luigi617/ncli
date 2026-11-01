@@ -1,4 +1,5 @@
 mod address_comment;
+mod implement;
 mod publish_comment;
 pub mod review;
 
@@ -6,6 +7,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Subcommand};
 
 pub use address_comment::AddressComment;
+pub use implement::Implement;
 pub use publish_comment::PublishComment;
 
 use super::{Context, Output};
@@ -17,6 +19,7 @@ pub enum CodeCommand {
     Review(review::Review),
     PublishComment(PublishComment),
     AddressComment(AddressComment),
+    Implement(Implement),
 }
 
 impl CodeCommand {
@@ -28,6 +31,7 @@ impl CodeCommand {
                 records: Vec::new(),
             }),
             Self::AddressComment(address) => address.run(context).map(Output::from),
+            Self::Implement(implement) => implement.run(context),
         }
     }
 }

@@ -26,7 +26,7 @@ pub enum Change {
     Link(String),
     Uncommitted {
         repo: PathBuf,
-        base: String,
+        base: Base,
         snapshot: String,
     },
     Branch {
@@ -35,6 +35,30 @@ pub enum Change {
         merge_base: String,
         head: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Base {
+    Commit(String),
+    Tree(String),
+}
+
+impl Base {
+    fn id(&self) -> &str {
+        match self {
+            Self::Commit(id) | Self::Tree(id) => id,
+        }
+    }
+}
+
+impl fmt::Display for Base {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Commit(commit) => f.write_str(commit),
+            Self::Tree(tree) => write!(f, "tree {tree}"),
+        }
+    }
 }
 
 // Kept as the full ref, since a local branch can share a remote branch's short name.
@@ -78,7 +102,14 @@ impl Git<'_> {
         self.run_with_input(&["hash-object", "-t", "tree", "--stdin"], Some(b""))
     }
 
-    fn snapshot(&self, base: &str) -> Result<String, Error> {
+    // A staged change is undone when the working tree matches the base there, so the snapshot
+    // misses the index entry, and that entry is neither committed nor in the earlier index.
+    fn snapshot(
+        &self,
+        base: &str,
+        committed: &str,
+        earlier: Option<&Index>,
+    ) -> Result<(String, Index), Error> {
         let dir = tempfile::Builder::new()
             .prefix("ncli-snapshot-")
             .tempdir()
@@ -100,19 +131,41 @@ impl Git<'_> {
         if !nested.is_empty() {
             return Err(Error::NestedRepositories(nested.join(", ")));
         }
-        let staged = git.changed_paths(&["--cached", base])?;
+        let index = git.index()?;
+        let uncommitted = git.changed_paths(&["--cached", committed])?;
         git.run(&["add", "--all", "--sparse"])?;
         let snapshot = git.run(&["write-tree"])?;
+        let snapshotted = git.index()?;
+        let missed = index.changed_paths(&snapshotted);
+        let restaged = earlier.map(|earlier| index.changed_paths(earlier));
         let kept = git.changed_paths(&[base, &snapshot])?;
         let kept: HashSet<&str> = kept.split('\0').collect();
-        let undone: Vec<&str> = staged
+        let undone: Vec<&str> = uncommitted
             .split('\0')
-            .filter(|path| !path.is_empty() && !kept.contains(path))
+            .filter(|path| {
+                !path.is_empty()
+                    && missed.contains(path)
+                    && restaged
+                        .as_ref()
+                        .is_none_or(|restaged| restaged.contains(path))
+                    && !kept.contains(path)
+            })
             .collect();
         if !undone.is_empty() {
             return Err(Error::UndoneStagedChanges(undone.join(", ")));
         }
-        Ok(snapshot)
+        Ok((snapshot, index))
+    }
+
+    fn index(&self) -> Result<Index, ProcessError> {
+        let entries = self.run(&["ls-files", "--stage", "-z"])?;
+        Ok(Index(
+            entries
+                .split('\0')
+                .filter_map(|entry| entry.split_once('\t'))
+                .map(|(entry, path)| (path.to_owned(), entry.to_owned()))
+                .collect(),
+        ))
     }
 
     fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {
@@ -219,6 +272,17 @@ impl Git<'_> {
     }
 }
 
+struct Index(HashSet<(String, String)>);
+
+impl Index {
+    fn changed_paths<'a>(&'a self, other: &'a Self) -> HashSet<&'a str> {
+        self.0
+            .symmetric_difference(&other.0)
+            .map(|(path, _)| path.as_str())
+            .collect()
+    }
+}
+
 // Git distrusts cached stat data newer than the index file, so the copy keeps the original mtime.
 fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
     let modified = match fs::metadata(from) {
@@ -232,8 +296,33 @@ fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
         .set_modified(modified)
 }
 
-impl Change {
-    pub fn local(cancellation: &Cancellation) -> Result<Self, Error> {
+pub struct Worktree {
+    pub repo: PathBuf,
+    pub head: Option<String>,
+    base: Base,
+    pub tree: String,
+    index: Index,
+}
+
+impl Worktree {
+    pub fn snapshot(cancellation: &Cancellation) -> Result<Self, Error> {
+        Self::take(None, cancellation)
+    }
+
+    // The earlier snapshot is the base, so changes staged before it count as part of the base.
+    pub fn since(&self, cancellation: &Cancellation) -> Result<Self, Error> {
+        Self::take(Some(self), cancellation)
+    }
+
+    pub fn change(&self) -> Change {
+        Change::Uncommitted {
+            repo: self.repo.clone(),
+            base: self.base.clone(),
+            snapshot: self.tree.clone(),
+        }
+    }
+
+    fn take(earlier: Option<&Self>, cancellation: &Cancellation) -> Result<Self, Error> {
         let git = Git {
             cli: Cli::new(["git"]),
             cwd: Path::new("."),
@@ -246,9 +335,14 @@ impl Change {
         };
         let git = Git { cwd: &repo, ..git };
         let head = git.head()?;
-        let base = match &head {
+        let committed = match &head {
             Some(head) => head.clone(),
             None => git.empty_tree()?,
+        };
+        let base = match (earlier, &head) {
+            (Some(earlier), _) => Base::Tree(earlier.tree.clone()),
+            (None, Some(head)) => Base::Commit(head.clone()),
+            (None, None) => Base::Tree(committed.clone()),
         };
         let submodules = git.dirty_submodules()?;
         if !submodules.is_empty() {
@@ -257,12 +351,40 @@ impl Change {
                 submodules: submodules.join(", "),
             });
         }
-        let snapshot = git.snapshot(&base)?;
-        if snapshot != git.run(&["rev-parse", &format!("{base}^{{tree}}")])? {
+        let (tree, index) =
+            git.snapshot(base.id(), &committed, earlier.map(|earlier| &earlier.index))?;
+        Ok(Self {
+            repo,
+            head,
+            base,
+            tree,
+            index,
+        })
+    }
+}
+
+impl Change {
+    pub fn local(cancellation: &Cancellation) -> Result<Self, Error> {
+        let Worktree {
+            repo,
+            head,
+            base,
+            tree,
+            ..
+        } = Worktree::snapshot(cancellation).map_err(|error| match error {
+            Error::NotAWorkTree(source) => Error::NoLocalChange(source),
+            error => error,
+        })?;
+        let git = Git {
+            cli: Cli::new(["git"]),
+            cwd: &repo,
+            cancellation,
+        };
+        if tree != git.run(&["rev-parse", &format!("{}^{{tree}}", base.id())])? {
             return Ok(Self::Uncommitted {
                 repo,
                 base,
-                snapshot,
+                snapshot: tree,
             });
         }
         let Some(head) = head else {
@@ -294,13 +416,16 @@ impl Change {
                 repo,
                 base,
                 snapshot,
-            } => format!(
-                "Read it yourself by running `git {diff} {base} {snapshot}` in the repository at \
+            } => {
+                let base = base.id();
+                format!(
+                    "Read it yourself by running `git {diff} {base} {snapshot}` in the repository at \
                  `{}`, and read files with `git show {snapshot}:<path>`, not from the working tree, \
                  which may have changed since. {}",
-                repo.display(),
-                binary(base, snapshot)
-            ),
+                    repo.display(),
+                    binary(base, snapshot)
+                )
+            }
             Self::Branch {
                 repo,
                 merge_base,
@@ -329,8 +454,12 @@ impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Link(link) => write!(f, "the change at {link}"),
-            Self::Uncommitted { repo, .. } => {
-                write!(f, "the uncommitted changes in {}", repo.display())
+            Self::Uncommitted { repo, base, .. } => {
+                write!(
+                    f,
+                    "the uncommitted changes in {} on top of {base}",
+                    repo.display()
+                )
             }
             Self::Branch {
                 repo, base, head, ..
