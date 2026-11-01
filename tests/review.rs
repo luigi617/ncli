@@ -392,7 +392,7 @@ esac
         );
         let snapshot = snapshot_of_uncommitted_review(&prompt);
         assert!(prompt.contains(&format!(
-            "`git diff --ignore-submodules=none --no-ext-diff {head} {snapshot}` in the repository at `{}`",
+            "`git diff --ignore-submodules=none --no-ext-diff --no-textconv {head} {snapshot}` in the repository at `{}`",
             root.display()
         )));
         fs::write(repo.path().join("new.rs"), "edited later\n").unwrap();
@@ -454,7 +454,7 @@ esac
         let snapshot = snapshot_of_uncommitted_review(&prompt);
         assert!(
             prompt.contains(&format!(
-                "`git diff --ignore-submodules=none --no-ext-diff {empty_tree} {snapshot}`"
+                "`git diff --ignore-submodules=none --no-ext-diff --no-textconv {empty_tree} {snapshot}`"
             )),
             "{prompt}"
         );
@@ -477,7 +477,7 @@ esac
             "{prompt}"
         );
         assert!(prompt.contains(&format!(
-            "`git log {merge_base}..{head}` and `git diff --ignore-submodules=none --no-ext-diff {merge_base} {head}`"
+            "`git log {merge_base}..{head}` and `git diff --ignore-submodules=none --no-ext-diff --no-textconv {merge_base} {head}`"
         )));
     }
 
@@ -629,11 +629,24 @@ esac
             &["commit", "--quiet", "--allow-empty", "--message", "Bump."],
         );
         git(repo.path(), &["config", "submodule.sub.ignore", "all"]);
-        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(reviewers_diff(repo.path()).contains("+Subproject commit "));
+    }
+
+    #[test]
+    fn the_reviewers_diff_shows_changes_a_textconv_driver_would_hide() {
+        let repo = repo();
+        fs::write(repo.path().join(".gitattributes"), "*.md diff=hide\n").unwrap();
+        git(repo.path(), &["config", "diff.hide.textconv", "true"]);
+        fs::write(repo.path().join("README.md"), "changed\n").unwrap();
+        let diff = reviewers_diff(repo.path());
+        assert!(diff.contains("\n+changed"), "{diff}");
+    }
+
+    fn reviewers_diff(repo: &Path) -> String {
+        let prompt = verdict_prompt_of_local_review(repo);
         let (_, command) = prompt.split_once("by running `git ").unwrap();
         let (command, _) = command.split_once('`').unwrap();
-        let args: Vec<&str> = command.split(' ').chain(["--stat"]).collect();
-        assert!(git(repo.path(), &args).contains("sub |"), "{command}");
+        git(repo, &command.split(' ').collect::<Vec<_>>())
     }
 
     #[test]

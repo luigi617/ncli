@@ -12,8 +12,13 @@ use crate::process::{self, Cancellation, Cli, ProcessError};
 
 const PREFERRED_REMOTE: &str = "origin";
 const REMOTES: &str = "refs/remotes/";
-// Ignores the user's diff settings, which could otherwise hide parts of the change.
-const DIFF: [&str; 3] = ["diff", "--ignore-submodules=none", "--no-ext-diff"];
+// Keeps the user's diff settings and drivers from hiding parts of the change.
+const DIFF: [&str; 4] = [
+    "diff",
+    "--ignore-submodules=none",
+    "--no-ext-diff",
+    "--no-textconv",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
