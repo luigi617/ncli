@@ -88,16 +88,11 @@ impl Git<'_> {
         if !hidden.is_empty() {
             return Err(Error::HiddenEdits(hidden.join(", ")));
         }
-        let tracked = git.gitlinks()?;
-        git.run(&["add", "--all"])?;
-        let nested: Vec<String> = git
-            .gitlinks()?
-            .into_iter()
-            .filter(|path| !tracked.contains(path))
-            .collect();
+        let nested = git.nested_repositories()?;
         if !nested.is_empty() {
             return Err(Error::NestedRepositories(nested.join(", ")));
         }
+        git.run(&["add", "--all"])?;
         Ok(git.run(&["write-tree"])?)
     }
 
@@ -133,13 +128,13 @@ impl Git<'_> {
             .collect())
     }
 
-    fn gitlinks(&self) -> Result<Vec<String>, ProcessError> {
-        let entries = self.run(&["ls-files", "--stage", "-z"])?;
-        Ok(entries
+    // Untracked files are listed one by one, so only a nested repository is listed as a directory.
+    fn nested_repositories(&self) -> Result<Vec<String>, ProcessError> {
+        let untracked = self.run(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+        Ok(untracked
             .split('\0')
-            .filter_map(|entry| entry.strip_prefix("160000 "))
-            .filter_map(|entry| entry.split_once('\t'))
-            .map(|(_, path)| path.to_owned())
+            .filter_map(|path| path.strip_suffix('/'))
+            .map(str::to_owned)
             .collect())
     }
 
@@ -174,15 +169,12 @@ impl Git<'_> {
     }
 
     fn default_branch(&self) -> Result<RemoteBranch, Error> {
-        let output = self.run(&[
-            "for-each-ref",
-            "--format=%(symref)",
-            &format!("{REMOTES}*/HEAD"),
-        ])?;
+        let output = self.run(&["for-each-ref", "--format=%(refname) %(symref)", REMOTES])?;
         let mut branches: Vec<RemoteBranch> = output
             .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| RemoteBranch(line.to_owned()))
+            .filter_map(|line| line.split_once(' '))
+            .filter(|(name, target)| name.ends_with("/HEAD") && !target.is_empty())
+            .map(|(_, target)| RemoteBranch(target.to_owned()))
             .collect();
         let preferred = format!("{REMOTES}{PREFERRED_REMOTE}/");
         match branches.len() {

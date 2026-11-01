@@ -59,7 +59,7 @@ pub enum Error {
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged --no-skip-worktree`"
+        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
     )]
     HiddenEdits(String),
     #[error(

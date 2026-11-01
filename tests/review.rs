@@ -670,7 +670,9 @@ esac
         assert!(
             error.contains(
                 "ncli code review: error: files marked assume-unchanged or skip-worktree have edits \
-                 the review would miss (README.md)"
+                 the review would miss (README.md); commit or revert them, or clear the marks with \
+                 `git update-index --no-assume-unchanged <paths>` and then `git update-index \
+                 --no-skip-worktree <paths>`"
             ),
             "{error}"
         );
@@ -728,13 +730,29 @@ esac
         fs::write(nested.join("a.rs"), "fn main() {}\n").unwrap();
         git(&nested, &["add", "a.rs"]);
         git(&nested, &["commit", "--quiet", "--message", "Nested."]);
+        let empty = repo.path().join("deep/empty");
+        fs::create_dir_all(&empty).unwrap();
+        git(&empty, &["init", "--quiet"]);
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: untracked git repositories cannot be reviewed (nested); \
-                 ignore them or add them as submodules"
+                "ncli code review: error: untracked git repositories cannot be reviewed \
+                 (deep/empty, nested); ignore them or add them as submodules"
             ),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn the_default_branch_may_be_on_a_remote_with_a_slash_in_its_name() {
+        let repo = repo_with_remote("team/upstream");
+        let (_, head) = feature_branch(repo.path());
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        assert!(
+            prompt.contains(&format!(
+                "about the commits on {head} since it branched from team/upstream/main in "
+            )),
+            "{prompt}"
         );
     }
 
