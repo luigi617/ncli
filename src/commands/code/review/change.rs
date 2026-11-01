@@ -297,8 +297,9 @@ impl Change {
             } => format!(
                 "Read it yourself by running `git {diff} {base} {snapshot}` in the repository at \
                  `{}`, and read files with `git show {snapshot}:<path>`, not from the working tree, \
-                 which may have changed since.",
-                repo.display()
+                 which may have changed since. {}",
+                repo.display(),
+                binary(base, snapshot)
             ),
             Self::Branch {
                 repo,
@@ -308,11 +309,20 @@ impl Change {
             } => format!(
                 "Read it yourself by running `git log {merge_base}..{head}` and `git {diff} \
                  {merge_base} {head}` in the repository at `{}`, and read files with `git show \
-                 {head}:<path>`, not from the working tree, which may have changed since.",
-                repo.display()
+                 {head}:<path>`, not from the working tree, which may have changed since. {}",
+                repo.display(),
+                binary(merge_base, head)
             ),
         }
     }
+}
+
+// An attribute can make the diff call a text file binary, which would hide its edits.
+fn binary(from: &str, to: &str) -> String {
+    format!(
+        "The diff may call a text file binary; read such a file with `git show {from}:<path>` and \
+         `git show {to}:<path>` and compare them."
+    )
 }
 
 impl fmt::Display for Change {

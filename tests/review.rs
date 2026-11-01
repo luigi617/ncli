@@ -642,6 +642,22 @@ esac
         assert!(diff.contains("\n+changed"), "{diff}");
     }
 
+    #[test]
+    fn reviewers_are_told_to_read_files_the_diff_calls_binary() {
+        let repo = repo();
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        fs::write(repo.path().join("README.md"), "changed\n").unwrap();
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert!(
+            prompt.contains(&format!(
+                "The diff may call a text file binary; read such a file with `git show \
+                 {head}:<path>` and `git show {snapshot}:<path>` and compare them."
+            )),
+            "{prompt}"
+        );
+    }
+
     fn reviewers_diff(repo: &Path) -> String {
         let prompt = verdict_prompt_of_local_review(repo);
         let (_, command) = prompt.split_once("by running `git ").unwrap();
