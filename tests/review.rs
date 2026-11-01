@@ -754,6 +754,33 @@ esac
     }
 
     #[test]
+    fn edits_outside_the_sparse_checkout_patterns_are_in_the_snapshot() {
+        let repo = repo();
+        fs::create_dir_all(repo.path().join("d")).unwrap();
+        fs::create_dir_all(repo.path().join("e")).unwrap();
+        fs::write(repo.path().join("d/x"), "x\n").unwrap();
+        fs::write(repo.path().join("e/y"), "y\n").unwrap();
+        git(repo.path(), &["add", "d", "e"]);
+        git(
+            repo.path(),
+            &["commit", "--quiet", "--message", "Add d and e."],
+        );
+        git(
+            repo.path(),
+            &["sparse-checkout", "set", "--no-cone", "/README.md"],
+        );
+        fs::create_dir_all(repo.path().join("d")).unwrap();
+        fs::write(repo.path().join("d/x"), "edited\n").unwrap();
+        let prompt = verdict_prompt_of_local_review(repo.path());
+        let snapshot = snapshot_of_uncommitted_review(&prompt);
+        assert_eq!(
+            git(repo.path(), &["show", &format!("{snapshot}:d/x")]),
+            "edited"
+        );
+        assert_eq!(git(repo.path(), &["show", &format!("{snapshot}:e/y")]), "y");
+    }
+
+    #[test]
     fn staged_changes_the_working_tree_undoes_are_rejected() {
         let repo = repo();
         fs::write(repo.path().join("kept.rs"), "fn kept() {}\n").unwrap();

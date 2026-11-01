@@ -101,7 +101,7 @@ impl Git<'_> {
             return Err(Error::NestedRepositories(nested.join(", ")));
         }
         let staged = git.changed_paths(&["--cached", base])?;
-        git.run(&["add", "--all"])?;
+        git.run(&["add", "--all", "--sparse"])?;
         let snapshot = git.run(&["write-tree"])?;
         let kept = git.changed_paths(&[base, &snapshot])?;
         let kept: HashSet<&str> = kept.split('\0').collect();
