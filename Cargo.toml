@@ -1,0 +1,36 @@
+[package]
+name = "ncli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+default-run = "ncli"
+description = "Define workflows that chain other CLIs into a single command."
+readme = "README.md"
+license = "MIT"
+
+[features]
+test-child = []
+
+[[bin]]
+name = "ncli-test-child"
+path = "tests/bin/ncli-test-child.rs"
+required-features = ["test-child"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+which = "8.0.6"
+
+[dev-dependencies]
+ncli = { path = ".", features = ["test-child"] }
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+signal-hook = "0.4.6"
+
+[target."cfg(windows)".dependencies]
+ctrlc = { version = "3.5.2", features = ["termination"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_Pipes"] }
