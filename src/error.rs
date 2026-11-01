@@ -65,6 +65,11 @@ impl Error {
         }
     }
 
+    // A usage error is not a result, and an unprintable output was already saved.
+    pub fn recorded(&self) -> bool {
+        !matches!(self, Self::Output(_)) && self.exit_code() != Self::USAGE
+    }
+
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,

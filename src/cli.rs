@@ -42,8 +42,11 @@ pub fn run() -> ExitCode {
     let cancelled = cancellation.is_cancelled();
     if let Err(error) = &result {
         if !cancelled || error.resume().is_some() {
-            let record = ncli.command.records_output() && error.exit_code() != Error::USAGE;
-            report(&prog, error, record);
+            report(
+                &prog,
+                error,
+                ncli.command.records_output() && error.recorded(),
+            );
         }
     }
     if cancelled {
@@ -72,7 +75,7 @@ fn print(output: &Output) -> Result<(), Error> {
         .iter()
         .try_for_each(|(entry, contents)| state::save(*entry, contents))
         .and_then(|()| state::remove(Entry::Failure));
-    printed.and(saved)
+    saved.and(printed)
 }
 
 fn prog(matches: &ArgMatches) -> String {

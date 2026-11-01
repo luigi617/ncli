@@ -408,6 +408,10 @@ esac
         assert!(stderr(&output).contains("could not write the output"));
         let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
         assert!(saved.starts_with("claude did it\n\nResume: "), "{saved}");
+        assert!(
+            !env.state.path().join("failure.txt").exists(),
+            "the write error would replace the saved output for copy"
+        );
     }
 
     #[test]
