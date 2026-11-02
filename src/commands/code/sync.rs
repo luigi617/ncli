@@ -220,7 +220,7 @@ impl Rebase<'_> {
         if !marked.is_empty() {
             return Err(unresolved(marked));
         }
-        let add: Vec<&str> = ["--literal-pathspecs", "add", "--all", "--"]
+        let add: Vec<&str> = ["--literal-pathspecs", "add", "--all", "--sparse", "--"]
             .into_iter()
             .chain(paths.iter().map(String::as_str))
             .collect();

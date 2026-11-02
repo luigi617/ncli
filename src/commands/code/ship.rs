@@ -81,11 +81,27 @@ impl Ship {
             cwd: repo,
             cancellation,
         };
-        gh.run(&["auth", "status"]).map_err(|error| match error {
+        let into = git.remote_branch(self.into.as_deref())?;
+        // gh picks its own repository from the remotes, which need not be the one pushed to.
+        let repository = gh_repository(&git.remote_url(&into.remote)?, repo, cancellation)?;
+        for url in git.remote_push_urls(&into.remote)? {
+            let pushed_to = gh_repository(&url, repo, cancellation)?;
+            if !repository.name.eq_ignore_ascii_case(&pushed_to.name) {
+                return Err(Error::PushesElsewhere {
+                    remote: into.remote.clone(),
+                    fetch: repository.name,
+                    push: pushed_to.name,
+                });
+            }
+        }
+        let mut auth = vec!["auth", "status"];
+        if let Some(host) = &repository.host {
+            auth.extend(["--hostname", host]);
+        }
+        gh.run(&auth).map_err(|error| match error {
             ProcessError::Exit { .. } => Error::GhUnauthenticated(error),
             error => error.into(),
         })?;
-        let into = git.remote_branch(self.into.as_deref())?;
         git.fetch(&into)?;
         let Some(head) = &worktree.head.commit else {
             return Err(Error::NoCommonHistory {
@@ -100,18 +116,6 @@ impl Ship {
                 repo: repo.to_owned(),
                 base: into,
             });
-        }
-        // gh picks its own repository from the remotes, which need not be the one pushed to.
-        let repository = gh_repository(&git.remote_url(&into.remote)?, repo, cancellation)?;
-        for url in git.remote_push_urls(&into.remote)? {
-            let pushed_to = gh_repository(&url, repo, cancellation)?;
-            if !repository.eq_ignore_ascii_case(&pushed_to) {
-                return Err(Error::PushesElsewhere {
-                    remote: into.remote.clone(),
-                    fetch: repository,
-                    push: pushed_to,
-                });
-            }
         }
         let default = git.remote_default(&into.remote)?;
         let current = worktree
@@ -197,7 +201,7 @@ impl Ship {
                 "--json",
                 "url,isCrossRepository",
                 "--repo",
-                &repository,
+                &repository.name,
             ])?;
             let open: Vec<PullRequest> = serde_json::from_str(&open).map_err(Error::GhOutput)?;
             if let Some(PullRequest { url, .. }) =
@@ -219,7 +223,7 @@ impl Ship {
                 "--body",
                 shipment.body.trim(),
                 "--repo",
-                &repository,
+                &repository.name,
             ])?;
             created
                 .lines()
@@ -246,9 +250,34 @@ impl Gh<'_> {
 
 // The remote as the `[HOST/]OWNER/REPO` gh takes, with an SSH host alias resolved to the host it
 // names. A local repository has no such name and is left for gh to judge.
-fn gh_repository(url: &str, cwd: &Path, cancellation: &Cancellation) -> Result<String, Error> {
+struct GhRepository {
+    name: String,
+    host: Option<String>,
+}
+
+impl GhRepository {
+    fn local(url: &str) -> Self {
+        Self {
+            name: url.to_owned(),
+            host: None,
+        }
+    }
+
+    fn hosted(host: &str, path: &str) -> Self {
+        Self {
+            name: format!("{host}/{path}"),
+            host: Some(host.to_owned()),
+        }
+    }
+}
+
+fn gh_repository(
+    url: &str,
+    cwd: &Path,
+    cancellation: &Cancellation,
+) -> Result<GhRepository, Error> {
     let (ssh, authority, path) = match url.split_once("://") {
-        Some(("file", _)) => return Ok(url.to_owned()),
+        Some(("file", _)) => return Ok(GhRepository::local(url)),
         Some((scheme, rest)) => {
             let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
             (scheme.contains("ssh"), authority, path)
@@ -260,7 +289,7 @@ fn gh_repository(url: &str, cwd: &Path, cancellation: &Cancellation) -> Result<S
             {
                 (true, authority, path)
             }
-            _ => return Ok(url.to_owned()),
+            _ => return Ok(GhRepository::local(url)),
         },
     };
     let host = authority
@@ -276,7 +305,7 @@ fn gh_repository(url: &str, cwd: &Path, cancellation: &Cancellation) -> Result<S
         return Err(Error::NotAGitHubRemote(url.to_owned()));
     }
     if !ssh {
-        return Ok(format!("{host}/{path}"));
+        return Ok(GhRepository::hosted(host, path));
     }
     let config = Cli::new(["ssh"]).run(
         &["-G".into(), "--".into(), host.into()],
@@ -288,7 +317,7 @@ fn gh_repository(url: &str, cwd: &Path, cancellation: &Cancellation) -> Result<S
         .lines()
         .find_map(|line| line.strip_prefix("hostname "))
         .map_or(host, str::trim);
-    Ok(format!("{host}/{path}"))
+    Ok(GhRepository::hosted(host, path))
 }
 
 fn line<'a>(field: &'static str, text: &'a str) -> Result<&'a str, Unshippable> {

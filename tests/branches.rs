@@ -418,6 +418,7 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                     .all(|call| call.ends_with("--repo github.com/acme/widgets")),
                 "{calls:?}"
             );
+            assert_eq!(calls[0], "auth status --hostname github.com", "{calls:?}");
             assert_eq!(env.logged("ssh.log").unwrap(), "-G -- work\n-G -- work\n");
         }
 
@@ -567,7 +568,7 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                 "{stderr}"
             );
             assert_eq!(env.count("ship"), 0);
-            assert_eq!(env.gh_calls(), ["auth status"]);
+            assert!(env.gh_calls().is_empty());
         }
 
         #[test]
@@ -984,6 +985,18 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                 prompt.contains("Do not stage, commit, or run git rebase"),
                 "{prompt}"
             );
+        }
+
+        #[test]
+        fn conflicts_outside_the_sparse_checkout_are_resolved() {
+            let env = Env::new();
+            feature(&env, "README.md", "feature\n");
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.git(&["sparse-checkout", "set", "--no-cone", "/feature.rs"]);
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.git(&["show", "HEAD:README.md"]), "resolved");
+            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "Feature.");
+            assert!(!env.rebasing());
         }
 
         #[cfg(unix)]
