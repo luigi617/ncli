@@ -1,52 +1,57 @@
 use std::io::{self, PipeReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{
+    Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio as StdStdio,
+};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{Communicated, WAIT_DELAY};
+use super::{Communicated, Stdio, WAIT_DELAY};
 
 pub struct Process {
     child: Child,
     group: Arc<Group>,
-    leave_running: bool,
+    stdio: Stdio,
 }
 
 impl Process {
-    pub fn spawn(mut command: Command, piped_stdin: bool, leave_running: bool) -> io::Result<Self> {
-        let output = || {
-            if leave_running {
-                Stdio::null()
+    pub fn spawn(mut command: Command, stdio: Stdio) -> io::Result<Self> {
+        type Make = fn() -> StdStdio;
+        let input = |piped: bool| -> Make {
+            if piped {
+                StdStdio::piped
             } else {
-                Stdio::piped()
+                StdStdio::null
             }
         };
-        command
-            .stdin(if piped_stdin {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(output())
-            .stderr(output());
+        let (stdin, output): (Make, Make) = match stdio {
+            Stdio::Piped { piped_stdin } => (input(piped_stdin), StdStdio::piped),
+            Stdio::Detached { piped_stdin } => (input(piped_stdin), StdStdio::null),
+            Stdio::Terminal => (StdStdio::inherit, StdStdio::inherit),
+        };
+        command.stdin(stdin()).stdout(output()).stderr(output());
+        let own_session = !matches!(stdio, Stdio::Terminal);
         // A new session detaches the child from ncli's terminal, so a terminal prompt fails
-        // instead of stopping the child until the timeout.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        // instead of stopping the child until the timeout. A command run in the terminal stays in
+        // ncli's foreground process group, which is what lets it read from the terminal.
+        if own_session {
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         let child = command.spawn()?;
-        let group = Arc::new(Group::new(&child)?);
+        let group = Arc::new(Group::new(&child, own_session)?);
         Ok(Self {
             child,
             group,
-            leave_running,
+            stdio,
         })
     }
 
@@ -63,7 +68,7 @@ impl Process {
         let mut pipes =
             Pipes::new(&mut self.child, input.unwrap_or_default()).inspect_err(|_| group.kill())?;
         let (exit_reader, exit_writer) = io::pipe().inspect_err(|_| group.kill())?;
-        let (child, kill_on_exit) = (&self.child, !self.leave_running);
+        let (child, kill_on_exit) = (&self.child, matches!(self.stdio, Stdio::Piped { .. }));
         thread::scope(|scope| {
             let waiter = scope.spawn(move || {
                 let result = wait_for_exit(child);
@@ -99,18 +104,24 @@ pub fn signal(status: ExitStatus) -> Option<i32> {
 
 pub struct Group {
     id: libc::pid_t,
+    whole: bool,
 }
 
 impl Group {
-    fn new(child: &Child) -> io::Result<Self> {
+    fn new(child: &Child, whole: bool) -> io::Result<Self> {
         let id = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
-        Ok(Self { id })
+        Ok(Self { id, whole })
     }
 
-    // Only valid while the leader is unreaped: until then the kernel cannot reuse the group id.
+    // Only valid while the leader is unreaped: until then the kernel cannot reuse its id. A child
+    // that shares ncli's process group is killed alone, as killing the group would kill ncli.
     pub fn kill(&self) {
         unsafe {
-            libc::killpg(self.id, libc::SIGKILL);
+            if self.whole {
+                libc::killpg(self.id, libc::SIGKILL);
+            } else {
+                libc::kill(self.id, libc::SIGKILL);
+            }
         }
     }
 }

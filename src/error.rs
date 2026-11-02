@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::commands::code::review::{Change, Head, RemoteBranch};
+use crate::commands::session::SessionName;
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
 
@@ -129,6 +130,16 @@ pub enum Error {
     State { entry: Entry, source: io::Error },
     #[error("the saved review is invalid ({0}); run `ncli code review` again")]
     SavedReview(#[source] serde_json::Error),
+    #[error("a tmux session named {0} already exists")]
+    SessionExists(SessionName),
+    #[error("there is no tmux session named {0}")]
+    NoSuchSession(SessionName),
+    #[error("not inside a tmux session, so there is no session to detach from")]
+    NotInTmux,
+    #[error("tmux listed a session in an unexpected format: {0}")]
+    TmuxSessions(String),
+    #[error("could not read the current directory: {0}")]
+    CurrentDirectory(#[source] io::Error),
     #[error("could not write the output: {0}")]
     Output(#[source] io::Error),
     #[error("could not install the interrupt handler: {0}")]
@@ -206,6 +217,11 @@ impl Error {
             | Self::NoStateDir
             | Self::State { .. }
             | Self::SavedReview(_)
+            | Self::SessionExists(_)
+            | Self::NoSuchSession(_)
+            | Self::NotInTmux
+            | Self::TmuxSessions(_)
+            | Self::CurrentDirectory(_)
             | Self::Snapshot(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)

@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::mem;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio as StdStdio};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +27,7 @@ use windows_sys::Win32::System::Threading::{
     THREAD_SUSPEND_RESUME, WaitForSingleObject,
 };
 
-use super::{Communicated, WAIT_DELAY};
+use super::{Communicated, Stdio, WAIT_DELAY};
 
 pub fn signal(_: ExitStatus) -> Option<i32> {
     None
@@ -44,21 +44,35 @@ pub struct Process {
 impl Process {
     // The pipes are created here rather than with `Stdio::piped()` so that they are synchronous, which
     // is what lets `CancelSynchronousIo` stop a read or write that a process outside the job blocks.
-    pub fn spawn(mut command: Command, piped_stdin: bool) -> io::Result<Self> {
-        let (stdout, child_stdout) = pipe()?;
-        let (stderr, child_stderr) = pipe()?;
-        let stdin = if piped_stdin {
-            let (child_stdin, stdin) = pipe()?;
-            command.stdin(Stdio::from(child_stdin));
-            Some(File::from(stdin))
-        } else {
-            command.stdin(Stdio::null());
-            None
+    // A command run in the terminal shares ncli's console and its Ctrl+C.
+    pub fn spawn(mut command: Command, stdio: Stdio) -> io::Result<Self> {
+        let (stdin, stdout, stderr) = match stdio {
+            Stdio::Piped { piped_stdin } => {
+                let (stdout, child_stdout) = pipe()?;
+                let (stderr, child_stderr) = pipe()?;
+                let stdin = if piped_stdin {
+                    let (child_stdin, stdin) = pipe()?;
+                    command.stdin(StdStdio::from(child_stdin));
+                    Some(File::from(stdin))
+                } else {
+                    command.stdin(StdStdio::null());
+                    None
+                };
+                command
+                    .stdout(StdStdio::from(child_stdout))
+                    .stderr(StdStdio::from(child_stderr))
+                    .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
+                (stdin, Some(File::from(stdout)), Some(File::from(stderr)))
+            }
+            Stdio::Terminal => {
+                command
+                    .stdin(StdStdio::inherit())
+                    .stdout(StdStdio::inherit())
+                    .stderr(StdStdio::inherit())
+                    .creation_flags(CREATE_SUSPENDED);
+                (None, None, None)
+            }
         };
-        command
-            .stdout(Stdio::from(child_stdout))
-            .stderr(Stdio::from(child_stderr))
-            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
         let mut child = command.spawn()?;
         drop(command);
         let group = Arc::new(Group::new(&mut child)?);
@@ -66,8 +80,8 @@ impl Process {
             child,
             group,
             stdin,
-            stdout: Some(File::from(stdout)),
-            stderr: Some(File::from(stderr)),
+            stdout,
+            stderr,
         })
     }
 
@@ -80,10 +94,10 @@ impl Process {
         input: Option<&[u8]>,
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
-        let mut stdout = self.stdout.take().expect("communicate runs once");
-        let mut stderr = self.stderr.take().expect("communicate runs once");
-        let stdout = Worker::spawn(move |stop| read(&mut stdout, stop));
-        let stderr = Worker::spawn(move |stop| read(&mut stderr, stop));
+        let reader = |pipe: Option<File>| {
+            pipe.map(|mut pipe| Worker::spawn(move |stop| read(&mut pipe, stop)))
+        };
+        let (stdout, stderr) = (reader(self.stdout.take()), reader(self.stderr.take()));
         let stdin = self.stdin.take().zip(input).map(|(mut stdin, input)| {
             let input = input.to_owned();
             Worker::spawn(move |stop| write(&mut stdin, &input, stop))
@@ -98,7 +112,10 @@ impl Process {
         };
         self.group.kill();
         let deadline = Instant::now() + WAIT_DELAY;
-        let (stdout, stderr) = (stdout.finish(deadline), stderr.finish(deadline));
+        let finish = |worker: Option<Worker<Vec<u8>>>| {
+            worker.map_or(Ok((Vec::new(), true)), |worker| worker.finish(deadline))
+        };
+        let (stdout, stderr) = (finish(stdout), finish(stderr));
         let fed = stdin.map(|stdin| stdin.finish(deadline)).transpose();
         let timed_out = timed_out?;
         let ((stdout, stdout_closed), (stderr, stderr_closed)) = (stdout?, stderr?);
