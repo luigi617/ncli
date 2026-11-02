@@ -52,6 +52,7 @@ impl Implement {
             }
             if round == self.max_rounds {
                 return Err(Error::Unsettled {
+                    remaining: verdict.count(),
                     rounds: round,
                     report: summary(context, &steps, &verdict),
                 });
@@ -96,13 +97,7 @@ fn last(steps: &[Performed]) -> &Performed {
 }
 
 fn resumable(error: Error, steps: &[Performed]) -> Error {
-    match error {
-        Error::Resumable { .. } => error,
-        source => Error::Resumable {
-            source: Box::new(source),
-            resume: last(steps).resume.clone(),
-        },
-    }
+    error.resumable(&last(steps).resume)
 }
 
 fn summary(context: &Context, steps: &[Performed], verdict: &Verdict) -> String {

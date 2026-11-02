@@ -1,0 +1,15 @@
+{
+  "problems": {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "sentence": { "type": "string" },
+        "problem": { "type": "string" },
+        "fix": { "type": "string" }
+      },
+      "required": ["sentence", "problem", "fix"],
+      "additionalProperties": false
+    }
+  }
+}

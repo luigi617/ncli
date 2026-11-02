@@ -88,9 +88,21 @@ pub enum Error {
         to: Box<Head>,
     },
     #[error(
-        "the review still has findings after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
+        "the review still has {remaining} after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
     )]
-    Unsettled { rounds: u32, report: String },
+    Unsettled {
+        remaining: String,
+        rounds: u32,
+        report: String,
+    },
+    #[error("{0} wrote no document")]
+    NothingWritten(String),
+    #[error("could not read the document at {}: {source}", .path.display())]
+    ReadDoc { path: PathBuf, source: io::Error },
+    #[error("the last output is not a document review; run `ncli doc review` first")]
+    NoDocReview,
+    #[error("the saved document review is invalid ({0}); run `ncli doc review` again")]
+    SavedDocReview(#[source] serde_json::Error),
     #[error("the task is empty")]
     EmptyTask,
     #[error(
@@ -129,6 +141,16 @@ impl Error {
     pub const FAILURE: u8 = 1;
     pub const USAGE: u8 = 2;
     pub const MISSING_EXECUTABLE: u8 = 127;
+
+    pub fn resumable(self, resume: &str) -> Self {
+        match self {
+            Self::Resumable { .. } => self,
+            source => Self::Resumable {
+                source: Box::new(source),
+                resume: resume.to_owned(),
+            },
+        }
+    }
 
     pub fn resume(&self) -> Option<&str> {
         match self {
@@ -170,6 +192,10 @@ impl Error {
             | Self::NothingImplemented { .. }
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
+            | Self::NothingWritten(_)
+            | Self::ReadDoc { .. }
+            | Self::NoDocReview
+            | Self::SavedDocReview(_)
             | Self::NoOutput
             | Self::NoSessions(_)
             | Self::Sessions { .. }

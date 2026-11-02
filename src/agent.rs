@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 
 use clap::ValueEnum;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::error::Error;
@@ -17,14 +18,29 @@ pub const STYLE: &str = include_str!("agent/style.md");
 
 pub const WORKDIR: &str = "ncli-";
 
-pub static TASK_SCHEMA: LazyLock<String> =
-    LazyLock::new(|| schema(include_str!("agent/task.schema.json")));
+pub static TASK_SCHEMA: LazyLock<String> = LazyLock::new(|| task_schema("{}"));
 
 // Kept on one line: Windows cannot pass an argument containing a newline to a batch-file shim.
 pub fn schema(json: &str) -> String {
     serde_json::from_str::<serde_json::Value>(json)
         .expect("the schema is valid JSON")
         .to_string()
+}
+
+// The task schema with more required fields, given as a JSON object of their schemas.
+pub fn task_schema(fields: &str) -> String {
+    let mut task: serde_json::Value = serde_json::from_str(include_str!("agent/task.schema.json"))
+        .expect("the task schema is valid JSON");
+    let fields: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(fields).expect("the fields are a JSON object");
+    for (name, field) in fields {
+        task["required"]
+            .as_array_mut()
+            .expect("the task schema lists its required fields")
+            .push(name.clone().into());
+        task["properties"][name] = field;
+    }
+    task.to_string()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -175,11 +191,16 @@ enum Item {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Outcome {
     completed: bool,
     report: String,
+    #[serde(flatten)]
+    fields: serde_json::Map<String, serde_json::Value>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoFields {}
 
 pub struct Performed {
     pub report: String,
@@ -201,6 +222,14 @@ pub struct Agent {
 }
 
 impl Agent {
+    // Codex writes only inside its working directory unless given more; Claude takes the same flag.
+    pub fn writable(self, dir: &Path) -> Self {
+        Self {
+            cli: self.cli.arg("--add-dir").arg(dir),
+            ..self
+        }
+    }
+
     pub fn ask(
         &self,
         prompt: &str,
@@ -212,7 +241,18 @@ impl Agent {
     }
 
     pub fn perform(&self, task: &str, cancellation: &Cancellation) -> Result<Performed, Error> {
-        let (answer, id) = self.attempt(task, None, cancellation);
+        self.perform_as(task, &TASK_SCHEMA, cancellation)
+            .map(|(performed, NoFields {})| performed)
+    }
+
+    // The schema extends the task schema with the fields of T, as task_schema builds it.
+    pub fn perform_as<T: DeserializeOwned>(
+        &self,
+        task: &str,
+        schema: &str,
+        cancellation: &Cancellation,
+    ) -> Result<(Performed, T), Error> {
+        let (answer, id) = self.attempt(task, schema, None, cancellation);
         let Some(id) = id else {
             answer?;
             return Err(Error::NoSession(self.name.clone()));
@@ -224,13 +264,14 @@ impl Agent {
             .chain([id.as_str()])
             .collect::<Vec<_>>()
             .join(" ");
-        let report = answer
-            .and_then(|answer| self.outcome(answer))
-            .map_err(|source| Error::Resumable {
-                source: Box::new(source),
-                resume: resume.clone(),
-            })?;
-        Ok(Performed { report, resume })
+        let (report, fields) =
+            answer
+                .and_then(|answer| self.outcome(answer))
+                .map_err(|source| Error::Resumable {
+                    source: Box::new(source),
+                    resume: resume.clone(),
+                })?;
+        Ok((Performed { report, resume }, fields))
     }
 
     // Starts in an empty directory instead of the user's, which limits only where the agent works by
@@ -241,11 +282,22 @@ impl Agent {
         task: &str,
         cancellation: &Cancellation,
     ) -> Result<String, Error> {
+        self.perform_isolated_as(task, &TASK_SCHEMA, cancellation)
+            .map(|(report, NoFields {})| report)
+    }
+
+    // The schema extends the task schema with the fields of T, as task_schema builds it.
+    pub fn perform_isolated_as<T: DeserializeOwned>(
+        &self,
+        task: &str,
+        schema: &str,
+        cancellation: &Cancellation,
+    ) -> Result<(String, T), Error> {
         let workdir = tempfile::Builder::new()
             .prefix(WORKDIR)
             .tempdir()
             .map_err(Error::WorkingDirectory)?;
-        self.attempt(task, Some(workdir.path()), cancellation)
+        self.attempt(task, schema, Some(workdir.path()), cancellation)
             .0
             .and_then(|answer| self.outcome(answer))
     }
@@ -253,6 +305,7 @@ impl Agent {
     fn attempt(
         &self,
         task: &str,
+        schema: &str,
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> (Result<String, Error>, Option<String>) {
@@ -263,7 +316,7 @@ impl Agent {
              {STYLE}"
         );
         let (args, assigned) = self.session.start();
-        let result = self.invoke(args, &prompt, Some(&TASK_SCHEMA), cwd, cancellation);
+        let result = self.invoke(args, &prompt, Some(schema), cwd, cancellation);
         let ran = match &result {
             Ok(output) => Some(output.as_str()),
             Err(Error::Process(error)) if !matches!(error, ProcessError::Spawn { .. }) => {
@@ -277,21 +330,26 @@ impl Agent {
         (result.map(|_| answer), id)
     }
 
-    fn outcome(&self, answer: String) -> Result<String, Error> {
-        let outcome: Outcome =
-            serde_json::from_str(&answer).map_err(|source| Error::InvalidAnswer {
+    fn outcome<T: DeserializeOwned>(&self, answer: String) -> Result<(String, T), Error> {
+        let invalid = |source, output| Error::InvalidAnswer {
+            agent: self.name.clone(),
+            source,
+            output,
+        };
+        let Outcome {
+            completed,
+            report,
+            fields,
+        } = serde_json::from_str(&answer).map_err(|source| invalid(source, answer.clone()))?;
+        if !completed {
+            return Err(Error::Incomplete {
                 agent: self.name.clone(),
-                source,
-                output: answer,
-            })?;
-        if outcome.completed {
-            Ok(outcome.report)
-        } else {
-            Err(Error::Incomplete {
-                agent: self.name.clone(),
-                report: outcome.report,
-            })
+                report,
+            });
         }
+        let fields = T::deserialize(serde_json::Value::Object(fields))
+            .map_err(|source| invalid(source, answer))?;
+        Ok((report, fields))
     }
 
     fn invoke(
