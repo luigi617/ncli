@@ -193,7 +193,7 @@ esac
             Path::new(env.logged("implement.cwd").unwrap().trim()),
             env.work.path().canonicalize().unwrap()
         );
-        for stage in ["implementing...", "round 1/3...", "verdict..."] {
+        for stage in ["implementing...", "round 1/5...", "verdict..."] {
             assert!(
                 stderr.contains(&format!("ncli code implement: {stage}")),
                 "{stderr}"
@@ -422,7 +422,7 @@ esac
     fn later_address_steps_see_the_earlier_decisions() {
         let env = Env::repo();
         env.fail(&[], &[FINDINGS]);
-        assert_eq!(env.count("address"), 3);
+        assert_eq!(env.count("address"), 5);
         assert!(!env.logged("address.1").unwrap().contains("<earlier>"));
         assert!(
             env.logged("address.2")

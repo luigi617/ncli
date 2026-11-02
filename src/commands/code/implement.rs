@@ -17,7 +17,7 @@ pub struct Implement {
     #[command(flatten)]
     pub panel: Panel,
     /// Most review rounds to run
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
     pub max_rounds: u32,
 }
 
