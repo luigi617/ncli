@@ -1,6 +1,7 @@
 pub mod code;
 mod copy;
 pub mod doc;
+pub mod session;
 pub mod standup;
 mod task;
 
@@ -64,6 +65,8 @@ pub enum Command {
     Copy,
     #[command(subcommand)]
     Doc(doc::DocCommand),
+    #[command(subcommand)]
+    Session(session::SessionCommand),
     Standup(standup::Standup),
     #[command(external_subcommand)]
     Task(Vec<String>),
@@ -73,6 +76,7 @@ impl Command {
     pub fn records_output(&self) -> bool {
         match self {
             Self::Code(_) | Self::Doc(_) | Self::Standup(_) | Self::Task(_) => true,
+            Self::Session(command) => command.records_output(),
             Self::Copy => false,
         }
     }
@@ -82,6 +86,7 @@ impl Command {
             Self::Code(command) => command.run(context).map(Some),
             Self::Copy => copy::run(context).map(|()| None),
             Self::Doc(command) => command.run(context).map(Some),
+            Self::Session(command) => command.run(context),
             Self::Standup(standup) => standup.run(context).map(|text| Some(text.into())),
             Self::Task(words) => task::run(words, context).map(|text| Some(text.into())),
         }

@@ -237,6 +237,18 @@ fn universal_newlines(bytes: &[u8]) -> String {
         .replace('\r', "\n")
 }
 
+#[derive(Clone, Copy)]
+enum Stdio {
+    Piped {
+        piped_stdin: bool,
+    },
+    #[cfg(unix)]
+    Detached {
+        piped_stdin: bool,
+    },
+    Terminal,
+}
+
 struct Communicated {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -251,6 +263,7 @@ pub struct Cli {
     attempts: u32,
     retry_delay: Duration,
     tracer: Box<dyn Tracer>,
+    terminal: bool,
     #[cfg(unix)]
     leave_running: bool,
 }
@@ -266,6 +279,7 @@ impl Cli {
             attempts: 1,
             retry_delay: Duration::ZERO,
             tracer: Box::new(SilentTracer),
+            terminal: false,
             #[cfg(unix)]
             leave_running: false,
         }
@@ -307,6 +321,15 @@ impl Cli {
         }
     }
 
+    // For an interactive command, such as one that attaches to a terminal multiplexer. It shares
+    // ncli's terminal, so its output is not captured and it gets no input from `run`.
+    pub fn terminal(self) -> Self {
+        Self {
+            terminal: true,
+            ..self
+        }
+    }
+
     // For a command that must leave a process running, such as a clipboard owner. That process would
     // hold the output pipes open, so the output is discarded.
     #[cfg(unix)]
@@ -317,14 +340,15 @@ impl Cli {
         }
     }
 
-    #[cfg(unix)]
-    fn spawn(&self, command: std::process::Command, piped_stdin: bool) -> io::Result<sys::Process> {
-        sys::Process::spawn(command, piped_stdin, self.leave_running)
-    }
-
-    #[cfg(windows)]
-    fn spawn(&self, command: std::process::Command, piped_stdin: bool) -> io::Result<sys::Process> {
-        sys::Process::spawn(command, piped_stdin)
+    fn stdio(&self, piped_stdin: bool) -> Stdio {
+        if self.terminal {
+            return Stdio::Terminal;
+        }
+        #[cfg(unix)]
+        if self.leave_running {
+            return Stdio::Detached { piped_stdin };
+        }
+        Stdio::Piped { piped_stdin }
     }
 
     pub fn executable(&self) -> &OsStr {
@@ -338,6 +362,10 @@ impl Cli {
         cwd: Option<&Path>,
         cancellation: &Cancellation,
     ) -> Result<String, ProcessError> {
+        assert!(
+            !(self.terminal && input.is_some()),
+            "a command run in the terminal reads its input from the terminal"
+        );
         let argv: Vec<OsString> = self.argv.iter().chain(args).cloned().collect();
         let call = |attempt| Call {
             argv: &argv,
@@ -408,11 +436,12 @@ impl Cli {
             command.current_dir(cwd);
         }
         let mut process =
-            self.spawn(command, input.is_some())
-                .map_err(|source| ProcessError::Spawn {
+            sys::Process::spawn(command, self.stdio(input.is_some())).map_err(|source| {
+                ProcessError::Spawn {
                     name: name(),
                     source,
-                })?;
+                }
+            })?;
         let registration = cancellation.register(process.group());
         let communicated = process.communicate(input, self.timeout);
         drop(registration);
