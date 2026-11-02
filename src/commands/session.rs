@@ -59,8 +59,8 @@ impl SessionName {
         if name.trim().is_empty() {
             return Err("a session name cannot be empty".to_owned());
         }
-        if name.contains([':', '.', '#', ';']) {
-            return Err("a session name cannot contain `:`, `.`, `#` or `;`".to_owned());
+        if name.contains([':', '.', '#', ';', '\\']) {
+            return Err("a session name cannot contain `:`, `.`, `#`, `;` or `\\`".to_owned());
         }
         Ok(Self(name.to_owned()))
     }

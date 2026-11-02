@@ -471,6 +471,8 @@ fn invalid_names_are_usage_errors_before_tmux_runs() {
         &["rename", "work", "r#{session_windows}"],
         &["kill", "work;"],
         &["rename", "other", "play;"],
+        &["add", "--name", "a\\b"],
+        &["kill", "a\\b"],
         &["use", "a.b"],
         &["kill", ":"],
         &["logs", "a.b"],
