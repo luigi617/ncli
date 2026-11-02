@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::address_comment;
+use super::fix;
 use super::review::{Change, LastReview, Panel, Report, Verdict, Worktree, debate};
 use crate::agent::{Agent, AgentKind, Performed};
 use crate::commands::{Context, Output, task};
@@ -163,5 +163,5 @@ fn address_prompt(
         ));
     }
     feedback.push_str("\n\n");
-    address_comment::task(&feedback)
+    fix::task(&feedback)
 }
