@@ -81,10 +81,22 @@ impl Command {
         match self {
             Self::Code(command) => command.run(context).map(Some),
             Self::Copy => copy::run(context).map(|()| None),
-            Self::Doc(command) => command.run(context).map(|text| Some(text.into())),
+            Self::Doc(command) => command.run(context).map(Some),
             Self::Standup(standup) => standup.run(context).map(|text| Some(text.into())),
             Self::Task(words) => task::run(words, context).map(|text| Some(text.into())),
         }
+    }
+}
+
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn count(count: usize, noun: &str) -> String {
+    match count {
+        0 => format!("no {noun}s"),
+        1 => format!("1 {noun}"),
+        count => format!("{count} {noun}s"),
     }
 }
 

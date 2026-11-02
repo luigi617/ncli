@@ -10,6 +10,7 @@ pub const DIR_VAR: &str = "NCLI_STATE_DIR";
 pub enum Entry {
     Output,
     Review,
+    DocReview,
     Failure,
 }
 
@@ -18,6 +19,7 @@ impl Entry {
         match self {
             Self::Output => "output.txt",
             Self::Review => "review.json",
+            Self::DocReview => "doc-review.json",
             Self::Failure => "failure.txt",
         }
     }
@@ -28,6 +30,7 @@ impl fmt::Display for Entry {
         f.write_str(match self {
             Self::Output => "output",
             Self::Review => "review",
+            Self::DocReview => "document review",
             Self::Failure => "failure",
         })
     }

@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::schema;
+use crate::commands::{count, one_line};
 
 pub static SCHEMA: LazyLock<String> = LazyLock::new(|| schema(include_str!("verdict.schema.json")));
 
@@ -42,11 +43,7 @@ impl Verdict {
     }
 
     pub fn count(&self) -> String {
-        match self.findings.len() {
-            0 => "no findings".to_owned(),
-            1 => "1 finding".to_owned(),
-            count => format!("{count} findings"),
-        }
+        count(self.findings.len(), "finding")
     }
 }
 
@@ -78,10 +75,6 @@ impl fmt::Display for Finding {
             one_line(&self.fix)
         )
     }
-}
-
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // CommonMark: a code span's fence must be longer than any run of backticks inside it, and a
