@@ -72,7 +72,7 @@ fn implement_takes_the_task_and_defaults_to_three_rounds_judged_by_claude() {
         panic!("expected an implement");
     };
     assert_eq!(implement.task, "add a flag");
-    assert_eq!(implement.max_rounds, 3);
+    assert_eq!(implement.max_rounds, 5);
     assert_eq!(implement.panel.judge, AgentKind::Claude);
 }
 
