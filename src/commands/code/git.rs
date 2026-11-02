@@ -130,7 +130,7 @@ impl<'a> Git<'a> {
         })
     }
 
-    pub(super) fn commit(&self, rev: &str) -> Result<Option<String>, ProcessError> {
+    fn commit(&self, rev: &str) -> Result<Option<String>, ProcessError> {
         self.optional(&[
             "rev-parse",
             "--verify",
@@ -139,7 +139,7 @@ impl<'a> Git<'a> {
         ])
     }
 
-    fn optional(&self, args: &[&str]) -> Result<Option<String>, ProcessError> {
+    pub(super) fn optional(&self, args: &[&str]) -> Result<Option<String>, ProcessError> {
         match self.run(args) {
             Err(ProcessError::Exit { code: 1, .. }) => Ok(None),
             found => found.map(Some),
@@ -159,24 +159,38 @@ impl<'a> Git<'a> {
             .map(|(_, (_, operation))| operation))
     }
 
+    pub(super) fn is_ancestor(&self, ancestor: &str, rev: &str) -> Result<bool, ProcessError> {
+        Ok(self
+            .optional(&["merge-base", "--is-ancestor", ancestor, rev])?
+            .is_some())
+    }
+
     pub(super) fn unmerged(&self) -> Result<Vec<String>, ProcessError> {
-        let mut paths: Vec<String> = self
-            .unmerged_entries()?
-            .into_iter()
-            .map(|(_, path)| path)
+        let entries = self.run(&["ls-files", "--unmerged", "-z"])?;
+        let mut paths: Vec<String> = entries
+            .split('\0')
+            .filter_map(|entry| entry.split_once('\t'))
+            .map(|(_, path)| path.to_owned())
             .collect();
         paths.dedup();
         Ok(paths)
     }
 
-    // Each unmerged index entry as its mode and path, one for each side of the conflict.
-    pub(super) fn unmerged_entries(&self) -> Result<Vec<(String, String)>, ProcessError> {
-        let entries = self.run(&["ls-files", "--unmerged", "-z"])?;
-        Ok(entries
-            .split('\0')
-            .filter_map(|entry| entry.split_once('\t'))
-            .filter_map(|(info, path)| Some((info.split_once(' ')?.0.to_owned(), path.to_owned())))
-            .collect())
+    // Each changed or untracked path.
+    pub(super) fn uncommitted(&self) -> Result<Vec<String>, ProcessError> {
+        let status = self.run(&["status", "--porcelain", "-z", "--untracked-files=all"])?;
+        let mut entries = status.split_terminator('\0');
+        let mut paths = Vec::new();
+        while let Some(entry) = entries.next() {
+            let Some((state, path)) = entry.split_at_checked(3) else {
+                continue;
+            };
+            if state.contains(['R', 'C']) {
+                entries.next();
+            }
+            paths.push(path.to_owned());
+        }
+        Ok(paths)
     }
 
     // The named branch on whichever remote has it, or the remote's default branch.
@@ -204,7 +218,7 @@ impl<'a> Git<'a> {
         {
             return Err(error.into());
         }
-        preferred(found).map_err(|found| {
+        preferred(found, |branch| &branch.remote).map_err(|found| {
             if found.is_empty() {
                 Error::NoRemoteBranch(name.to_owned())
             } else {
@@ -218,22 +232,13 @@ impl<'a> Git<'a> {
     }
 
     // Asks the remote itself, since its remote-tracking refs may not have been fetched.
-    pub(super) fn remote_has(&self, remote: &str, branch: &str) -> Result<bool, ProcessError> {
+    fn remote_has(&self, remote: &str, branch: &str) -> Result<bool, ProcessError> {
         let refname = format!("refs/heads/{branch}");
         let listed = self.run(&["ls-remote", "--heads", remote, &refname])?;
         Ok(listed.lines().any(|line| {
             line.split_once('\t')
                 .is_some_and(|(_, name)| name == refname)
         }))
-    }
-
-    pub(super) fn remote_url(&self, remote: &str) -> Result<String, ProcessError> {
-        self.run(&["remote", "get-url", remote])
-    }
-
-    pub(super) fn remote_push_urls(&self, remote: &str) -> Result<Vec<String>, ProcessError> {
-        let listed = self.run(&["remote", "get-url", "--push", "--all", remote])?;
-        Ok(listed.lines().map(str::to_owned).collect())
     }
 
     pub(super) fn remote_default(&self, remote: &str) -> Result<Option<String>, ProcessError> {
@@ -251,7 +256,7 @@ impl<'a> Git<'a> {
     }
 
     fn default_branch(&self) -> Result<RemoteBranch, Error> {
-        let found = self
+        let found: Vec<RemoteBranch> = self
             .remote_refs()?
             .into_iter()
             .filter_map(|(name, target)| {
@@ -263,15 +268,24 @@ impl<'a> Git<'a> {
                 })
             })
             .collect();
-        preferred(found).map_err(|found| {
-            if found.is_empty() {
-                Error::NoDefaultBranch
-            } else {
-                Error::AmbiguousDefaultBranch {
-                    branches: listed(&found),
-                    preferred: PREFERRED_REMOTE,
-                }
-            }
+        if found.is_empty() {
+            return self.reported_default_branch();
+        }
+        preferred(found, |branch| &branch.remote).map_err(|found| Error::AmbiguousDefaultBranch {
+            branches: listed(&found),
+            preferred: PREFERRED_REMOTE,
+        })
+    }
+
+    // A repository not made by `git clone` has no `<remote>/HEAD`, so the remote is asked instead.
+    fn reported_default_branch(&self) -> Result<RemoteBranch, Error> {
+        let remotes = self.run(&["remote"])?;
+        let remote = preferred(remotes.lines().collect(), |remote| remote)
+            .map_err(|_| Error::NoDefaultBranch)?;
+        let branch = self.remote_default(remote)?.ok_or(Error::NoDefaultBranch)?;
+        Ok(RemoteBranch {
+            remote: remote.to_owned(),
+            branch,
         })
     }
 
@@ -286,13 +300,13 @@ impl<'a> Git<'a> {
     }
 }
 
-fn preferred(mut found: Vec<RemoteBranch>) -> Result<RemoteBranch, Vec<RemoteBranch>> {
+fn preferred<T>(mut found: Vec<T>, remote: impl Fn(&T) -> &str) -> Result<T, Vec<T>> {
     if found.len() == 1 {
         return Ok(found.remove(0));
     }
     match found
         .iter()
-        .position(|branch| branch.remote == PREFERRED_REMOTE)
+        .position(|item| remote(item) == PREFERRED_REMOTE)
     {
         Some(index) => Ok(found.swap_remove(index)),
         None => Err(found),

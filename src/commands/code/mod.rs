@@ -14,7 +14,8 @@ pub use git::{Head, Operation, RemoteBranch};
 pub use green::Green;
 pub use implement::Implement;
 pub use publish_comment::PublishComment;
-pub use ship::{Ship, Unshippable};
+pub use ship::{Ship, Unshipped};
+pub use sync::Unsynced;
 
 use super::{Context, Output};
 use crate::agent::Performed;

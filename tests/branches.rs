@@ -12,7 +12,7 @@ mod binary {
     use ncli::error::Error;
     use tempfile::TempDir;
 
-    const TOOLS: [&str; 7] = ["git", "sh", "cat", "basename", "touch", "rm", "sleep"];
+    const TOOLS: [&str; 5] = ["git", "sh", "cat", "touch", "sleep"];
 
     const FAKE_AGENT: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -23,42 +23,37 @@ next() {
     printf '%s' "$prompt" > "$log/$1.$count"
 }
 answer() {
-    echo '{"completed": true, "report": "'"$1"' report '"$count"'"'"$2"'}'
+    echo '{"completed": '"${FAKE_COMPLETED:-true}"', "report": "'"$1"' report '"$count"'"'"$2"'}'
 }
+RESOLVE="printf 'resolved\\n' > README.md && git add README.md && GIT_EDITOR=: git rebase --continue"
+SHIP='case "$prompt" in *"Create a new branch"*) git switch --quiet --create add-feature ;; esac
+git add --all && { git diff --cached --quiet || git commit --quiet --message "Add a feature."; } &&
+git push --quiet --set-upstream origin HEAD'
 case "$prompt" in
-*"Write what is needed to open a pull request"*)
+*"as a pull request against"*)
     next ship
-    eval "${FAKE_SHIP:-true}"
-    answer ship ', "commit_message": "'"${FAKE_MESSAGE-Add a feature.}"'", "branch": "'"${FAKE_BRANCH-add-feature}"'", "title": "Add a feature", "body": "The body."' ;;
+    eval "${FAKE_SHIP:-$SHIP}" >&2
+    answer ship ', "url": "https://example.com/pr/1"' ;;
 *"The check \`"*)
     next fix
     eval "${FAKE_FIX:-touch fixed}"
     answer fix ;;
 *"stopped with conflicts"*)
     next resolve
-    eval "${FAKE_RESOLVE:-printf 'resolved\n' > README.md}"
-    answer resolve ', "kept": ['"${FAKE_KEPT}"']' ;;
+    eval "${FAKE_RESOLVE:-$RESOLVE}" >&2
+    answer resolve ;;
 esac
 "#;
 
     const FAKE_GH: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$NCLI_TEST_LOG/gh.log"
+[ -z "$FAKE_GH_LOGGED_OUT" ] || { echo "not logged in" >&2; exit 1; }
 case "$1 $2" in
-"auth status") [ -z "$FAKE_GH_LOGGED_OUT" ] || { echo "not logged in" >&2; exit 1; } ;;
-"pr list") echo "${FAKE_GH_PRS:-[]}" ;;
-"pr create") echo "Creating pull request"; echo "https://example.com/pr/1" ;;
+"pr view")
+    branch=$(git branch --show-current)
+    oid=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")
+    echo '{"url": "'"$3"'", "state": "'"${FAKE_GH_STATE:-OPEN}"'", "baseRefName": "'"${FAKE_GH_BASE:-main}"'", "headRefName": "'"${FAKE_GH_HEAD:-$branch}"'", "headRefOid": "'"$oid"'"}' ;;
 esac
-"#;
-
-    const FAKE_SSH: &str = r#"#!/bin/sh
-if [ "$1" = "-G" ]; then
-    printf '%s\n' "$*" >> "$NCLI_TEST_LOG/ssh.log"
-    echo "user git"
-    echo "hostname github.com"
-    exit
-fi
-for command; do :; done
-cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
 "#;
 
     struct Env {
@@ -239,6 +234,9 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
     mod ship {
         use super::*;
 
+        const VIEW: &str =
+            "pr view https://example.com/pr/1 --json url,state,baseRefName,headRefName,headRefOid";
+
         #[test]
         fn uncommitted_changes_on_the_default_branch_become_a_new_pull_request() {
             let env = Env::new();
@@ -247,34 +245,30 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
             let (stdout, _) = env.succeed(&["code", "ship"], &[]);
             assert_eq!(stdout, "https://example.com/pr/1\n");
             assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
-            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "Add a feature.");
             assert_eq!(env.git(&["rev-parse", "HEAD~1"]), start);
-            assert_eq!(env.git(&["status", "--porcelain"]), "");
             assert_eq!(env.git(&["rev-parse", "main"]), start);
             assert_eq!(
                 env.origin_ref("refs/heads/add-feature"),
                 Some(env.git(&["rev-parse", "HEAD"]))
             );
-            assert_eq!(
-                env.git(&["rev-parse", "--abbrev-ref", "add-feature@{upstream}"]),
-                "origin/add-feature"
-            );
-            let calls = env.gh_calls();
-            assert!(
-                calls.contains(&format!(
-                    "pr create --base main --head add-feature --title Add a feature --body The \
-                     body. --repo {}",
-                    env.origin.path().display()
-                )),
-                "{calls:?}"
-            );
+            assert_eq!(env.gh_calls(), [VIEW]);
             let prompt = env.logged("ship.1").unwrap();
-            assert!(prompt.contains("against origin/main"), "{prompt}");
+            assert!(
+                prompt.contains("as a pull request against origin/main"),
+                "{prompt}"
+            );
             assert!(prompt.contains("the uncommitted changes in "), "{prompt}");
             assert!(
-                prompt.contains(
-                    "Do not change any file, do not commit, do not push, and do not run gh"
-                ),
+                prompt.contains("with a message of one short sentence"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("Create a new branch"), "{prompt}");
+            assert!(
+                prompt.contains("`--force-with-lease --force-if-includes`"),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains("already has an open pull request against main"),
                 "{prompt}"
             );
         }
@@ -287,275 +281,196 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
             env.git(&["switch", "--quiet", "--create", "feature", "origin/develop"]);
             env.write("feature.rs", "fn f() {}\n");
             let head = env.commit("Add the feature.");
-            let (stdout, _) = env.succeed(&["code", "ship", "--into", "develop"], &[]);
+            let base = ("FAKE_GH_BASE", "develop");
+            let (stdout, _) = env.succeed(&["code", "ship", "--into", "develop"], &[base]);
             assert_eq!(stdout, "https://example.com/pr/1\n");
             assert_eq!(env.git(&["branch", "--show-current"]), "feature");
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), head);
             assert_eq!(env.origin_ref("refs/heads/feature"), Some(head));
-            let calls = env.gh_calls();
-            assert!(
-                calls
-                    .iter()
-                    .any(|call| call.starts_with("pr create --base develop --head feature ")),
-                "{calls:?}"
-            );
             let prompt = env.logged("ship.1").unwrap();
             assert!(
                 prompt.contains("since it branched from origin/develop"),
                 "{prompt}"
             );
             assert!(
-                prompt.contains("leave the commit message empty"),
+                prompt.contains("Ship from the current branch, feature."),
                 "{prompt}"
             );
+            assert!(!prompt.contains("uncommitted"), "{prompt}");
         }
 
         #[test]
-        fn a_branch_with_an_open_pull_request_is_pushed_and_reported() {
-            let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            env.write("feature.rs", "fn f() {}\n");
-            let prs = (
-                "FAKE_GH_PRS",
-                r#"[{"url": "https://example.com/pr/7", "isCrossRepository": false}]"#,
-            );
-            let (stdout, _) = env.succeed(&["code", "ship"], &[prs]);
-            assert_eq!(stdout, "https://example.com/pr/7\n");
-            assert_eq!(
-                env.origin_ref("refs/heads/feature"),
-                Some(env.git(&["rev-parse", "HEAD"]))
-            );
-            let calls = env.gh_calls();
-            assert!(
-                calls.contains(&format!(
-                    "pr list --head feature --base main --state open --json \
-                     url,isCrossRepository --repo {}",
-                    env.origin.path().display()
-                )),
-                "{calls:?}"
-            );
-            assert!(
-                !calls.iter().any(|call| call.starts_with("pr create")),
-                "{calls:?}"
-            );
-        }
-
-        #[test]
-        fn an_open_pull_request_from_another_repository_is_not_reused() {
-            let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            env.write("feature.rs", "fn f() {}\n");
-            let prs = (
-                "FAKE_GH_PRS",
-                r#"[{"url": "https://example.com/pr/7", "isCrossRepository": true}]"#,
-            );
-            let (stdout, _) = env.succeed(&["code", "ship"], &[prs]);
-            assert_eq!(stdout, "https://example.com/pr/1\n");
-            let calls = env.gh_calls();
-            assert!(
-                calls
-                    .iter()
-                    .any(|call| call.starts_with("pr create --base main --head feature ")),
-                "{calls:?}"
-            );
-        }
-
-        #[test]
-        fn gh_is_pointed_at_the_repository_pushed_to() {
-            let env = Env::new();
-            let upstream = TempDir::new().unwrap();
-            git(upstream.path(), &["init", "--quiet", "--bare"]);
-            env.git(&[
-                "remote",
-                "add",
-                "upstream",
-                upstream.path().to_str().unwrap(),
-            ]);
-            env.write("feature.rs", "fn f() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            let repo = format!("--repo {}", env.origin.path().display());
-            let calls = env.gh_calls();
-            let pr_calls: Vec<_> = calls
-                .iter()
-                .filter(|call| call.starts_with("pr "))
-                .collect();
-            assert_eq!(pr_calls.len(), 2, "{calls:?}");
-            assert!(
-                pr_calls.iter().all(|call| call.ends_with(&repo)),
-                "{calls:?}"
-            );
-        }
-
-        #[test]
-        fn gh_is_given_the_host_an_ssh_alias_names() {
-            let env = Env::new();
-            script(env.bin.path(), "ssh", FAKE_SSH);
-            let root = TempDir::new().unwrap();
-            let widgets = root.path().join("acme/widgets.git");
-            git(
-                env.work.path(),
-                &[
-                    "clone",
-                    "--quiet",
-                    "--bare",
-                    env.origin.path().to_str().unwrap(),
-                    widgets.to_str().unwrap(),
-                ],
-            );
-            env.git(&["remote", "set-url", "origin", "work:acme/widgets.git"]);
-            env.write("feature.rs", "fn f() {}\n");
-            let ssh_root = ("FAKE_SSH_ROOT", root.path().to_str().unwrap());
-            env.succeed(&["code", "ship"], &[ssh_root]);
-            let calls = env.gh_calls();
-            let pr_calls: Vec<_> = calls
-                .iter()
-                .filter(|call| call.starts_with("pr "))
-                .collect();
-            assert_eq!(pr_calls.len(), 2, "{calls:?}");
-            assert!(
-                pr_calls
-                    .iter()
-                    .all(|call| call.ends_with("--repo github.com/acme/widgets")),
-                "{calls:?}"
-            );
-            assert_eq!(calls[0], "auth status --hostname github.com", "{calls:?}");
-            assert_eq!(env.logged("ssh.log").unwrap(), "-G -- work\n-G -- work\n");
-        }
-
-        #[test]
-        fn a_remote_that_pushes_elsewhere_is_refused_before_committing() {
-            let env = Env::new();
-            let start = env.git(&["rev-parse", "HEAD"]);
-            let fork = TempDir::new().unwrap();
-            git(fork.path(), &["init", "--quiet", "--bare"]);
-            env.git(&[
-                "remote",
-                "set-url",
-                "--push",
-                "origin",
-                fork.path().to_str().unwrap(),
-            ]);
-            env.write("feature.rs", "fn f() {}\n");
-            let stderr = env.fail(&["code", "ship"], &[]);
-            assert!(stderr.contains("but pushes to"), "{stderr}");
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
-            assert_eq!(env.git(&["branch", "--show-current"]), "main");
-            assert!(env.logged("ship.1").is_none());
-            assert!(
-                !env.gh_calls().iter().any(|call| call.starts_with("pr ")),
-                "{:?}",
-                env.gh_calls()
-            );
-        }
-
-        #[test]
-        fn a_remote_with_any_push_url_elsewhere_is_refused_before_committing() {
-            let env = Env::new();
-            let start = env.git(&["rev-parse", "HEAD"]);
-            let fork = TempDir::new().unwrap();
-            git(fork.path(), &["init", "--quiet", "--bare"]);
-            let origin = env.origin.path().to_str().unwrap();
-            env.git(&["remote", "set-url", "--add", "--push", "origin", origin]);
-            let fork_path = fork.path().to_str().unwrap();
-            env.git(&["remote", "set-url", "--add", "--push", "origin", fork_path]);
-            env.write("feature.rs", "fn f() {}\n");
-            let stderr = env.fail(&["code", "ship"], &[]);
-            assert!(stderr.contains("but pushes to"), "{stderr}");
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
-            assert!(git(fork.path(), &["for-each-ref"]).is_empty());
-        }
-
-        #[test]
-        fn the_default_branch_is_not_pushed_when_shipping_into_another_branch() {
+        fn the_default_branch_is_not_shipped_from_when_shipping_into_another_branch() {
             let env = Env::new();
             let start = env.git(&["rev-parse", "HEAD"]);
             env.push_upstream("develop", "dev.txt", "dev\n");
             env.write("feature.rs", "fn f() {}\n");
-            let (stdout, _) = env.succeed(&["code", "ship", "--into", "develop"], &[]);
-            assert_eq!(stdout, "https://example.com/pr/1\n");
+            let base = ("FAKE_GH_BASE", "develop");
+            env.succeed(&["code", "ship", "--into", "develop"], &[base]);
             assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
             assert_eq!(env.origin_ref("refs/heads/main"), Some(start));
-            let calls = env.gh_calls();
+            let prompt = env.logged("ship.1").unwrap();
+            assert!(prompt.contains("Create a new branch"), "{prompt}");
+        }
+
+        fn assert_unshipped(env: &Env, vars: &[(&str, &str)], problem: &str) {
+            let stderr = env.fail(&["code", "ship"], vars);
             assert!(
-                calls
-                    .iter()
-                    .any(|call| call.starts_with("pr create --base develop --head add-feature ")),
-                "{calls:?}"
+                stderr.contains(&format!(
+                    "error: claude did not finish shipping to origin/main: {problem}: ship report 1\nResume: claude --resume "
+                )),
+                "{stderr}"
             );
         }
 
         #[test]
-        fn a_shipped_branch_rebased_by_sync_is_shipped_again() {
+        fn uncommitted_changes_left_by_the_agent_are_an_error() {
             let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
             env.write("feature.rs", "fn f() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            env.push_upstream("main", "README.md", "upstream\n");
-            env.succeed(&["code", "sync"], &[]);
-            env.write("more.rs", "fn g() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            assert_eq!(
-                env.origin_ref("refs/heads/feature"),
-                Some(env.git(&["rev-parse", "HEAD"]))
+            let ship = ("FAKE_SHIP", "true");
+            assert_unshipped(
+                &env,
+                &[ship],
+                "the working tree has uncommitted changes (feature.rs)",
+            );
+            assert!(env.gh_calls().is_empty());
+        }
+
+        #[test]
+        fn shipping_from_the_target_branch_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let ship = (
+                "FAKE_SHIP",
+                "git add --all && git commit --quiet --message x && git push --quiet origin HEAD",
+            );
+            let stderr = env.fail(&["code", "ship"], &[ship]);
+            assert!(
+                stderr.contains("did not finish shipping to origin/main: HEAD is main at ")
+                    && stderr.contains(
+                        ", which is not a branch to open a pull request from: ship report 1\nResume: "
+                    ),
+                "{stderr}"
+            );
+            assert!(env.gh_calls().is_empty());
+        }
+
+        #[test]
+        fn shipping_from_the_default_branch_into_another_branch_is_an_error() {
+            let env = Env::new();
+            env.push_upstream("develop", "dev.txt", "dev\n");
+            env.write("feature.rs", "fn f() {}\n");
+            let ship = (
+                "FAKE_SHIP",
+                "git add --all && git commit --quiet --message x && git push --quiet origin HEAD",
+            );
+            let base = ("FAKE_GH_BASE", "develop");
+            let stderr = env.fail(&["code", "ship", "--into", "develop"], &[ship, base]);
+            assert!(
+                stderr.contains("did not finish shipping to origin/develop: HEAD is main at ")
+                    && stderr.contains(
+                        ", which is not a branch to open a pull request from: ship report 1\nResume: "
+                    ),
+                "{stderr}"
+            );
+            assert!(env.gh_calls().is_empty());
+        }
+
+        #[test]
+        fn a_detached_head_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let ship = ("FAKE_SHIP", "eval \"$SHIP\" && git switch --quiet --detach");
+            let stderr = env.fail(&["code", "ship"], &[ship]);
+            assert!(stderr.contains("HEAD is a detached HEAD at "), "{stderr}");
+        }
+
+        #[test]
+        fn an_unpushed_branch_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let ship = (
+                "FAKE_SHIP",
+                "git switch --quiet --create add-feature && git add --all && git commit --quiet --message x",
+            );
+            let stderr = env.fail(&["code", "ship"], &[ship]);
+            let head = env.git(&["rev-parse", "HEAD"]);
+            assert!(
+                stderr.contains(&format!(
+                    "the pull request at https://example.com/pr/1 has head commit , not {head}: \
+                     ship report 1\nResume: "
+                )),
+                "{stderr}"
             );
         }
 
         #[test]
-        fn a_rebased_branch_is_not_pushed_over_commits_it_has_not_seen() {
+        fn a_pull_request_that_is_not_open_is_an_error() {
             let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
             env.write("feature.rs", "fn f() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            let theirs = env.push_upstream("feature", "theirs.rs", "theirs\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            env.succeed(&["code", "sync"], &[]);
-            env.write("more.rs", "fn g() {}\n");
-            env.fail(&["code", "ship"], &[]);
-            assert_eq!(env.origin_ref("refs/heads/feature"), Some(theirs));
-        }
-
-        #[test]
-        fn a_fetched_commit_the_branch_never_had_is_not_pushed_over() {
-            let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            env.write("feature.rs", "fn f() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            let theirs = env.push_upstream("feature", "theirs.rs", "theirs\n");
-            env.git(&["fetch", "--quiet", "origin"]);
-            env.write("more.rs", "fn g() {}\n");
-            env.fail(&["code", "ship"], &[]);
-            assert_eq!(env.origin_ref("refs/heads/feature"), Some(theirs));
-        }
-
-        #[test]
-        fn a_branch_deleted_on_the_remote_is_pushed_again() {
-            let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            env.write("feature.rs", "fn f() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            git(
-                env.origin.path(),
-                &["branch", "--quiet", "--delete", "--force", "feature"],
-            );
-            env.write("more.rs", "fn g() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            assert_eq!(
-                env.origin_ref("refs/heads/feature"),
-                Some(env.git(&["rev-parse", "HEAD"]))
+            assert_unshipped(
+                &env,
+                &[("FAKE_GH_STATE", "MERGED")],
+                "the pull request at https://example.com/pr/1 has state MERGED, not OPEN",
             );
         }
 
         #[test]
-        fn a_tag_named_like_the_branch_does_not_block_the_push() {
+        fn a_pull_request_against_another_branch_is_an_error() {
             let env = Env::new();
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            env.git(&["tag", "feature"]);
             env.write("feature.rs", "fn f() {}\n");
-            env.succeed(&["code", "ship"], &[]);
-            assert_eq!(
-                env.origin_ref("refs/heads/feature"),
-                Some(env.git(&["rev-parse", "HEAD"]))
+            assert_unshipped(
+                &env,
+                &[("FAKE_GH_BASE", "develop")],
+                "the pull request at https://example.com/pr/1 has base branch develop, not main",
             );
+        }
+
+        #[test]
+        fn a_pull_request_from_another_branch_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            assert_unshipped(
+                &env,
+                &[("FAKE_GH_HEAD", "other")],
+                "the pull request at https://example.com/pr/1 has head branch other, not \
+                 add-feature",
+            );
+        }
+
+        #[test]
+        fn a_failing_gh_after_the_agent_can_be_resumed() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let stderr = env.fail(&["code", "ship"], &[("FAKE_GH_LOGGED_OUT", "1")]);
+            assert!(stderr.contains("not logged in"), "{stderr}");
+            assert!(
+                stderr
+                    .trim_end()
+                    .lines()
+                    .last()
+                    .unwrap()
+                    .starts_with("Resume: claude --resume "),
+                "{stderr}"
+            );
+        }
+
+        #[test]
+        fn an_agent_that_could_not_finish_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let stderr = env.fail(&["code", "ship"], &[("FAKE_COMPLETED", "false")]);
+            assert!(
+                stderr.contains(
+                    "error: claude could not finish the task: ship report 1\nResume: claude --resume "
+                ),
+                "{stderr}"
+            );
+            assert!(env.gh_calls().is_empty());
+        }
+
+        fn assert_rejected(env: &Env) {
+            assert_eq!(env.count("ship"), 0);
+            assert!(env.gh_calls().is_empty());
         }
 
         #[test]
@@ -567,44 +482,32 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                 stderr.contains("error: no remote has a branch named nope"),
                 "{stderr}"
             );
-            assert_eq!(env.count("ship"), 0);
-            assert!(env.gh_calls().is_empty());
+            assert_rejected(&env);
         }
 
         #[test]
-        fn an_into_branch_not_yet_fetched_is_found_on_the_remote() {
+        fn an_unreachable_origin_is_rejected_up_front() {
             let env = Env::new();
-            env.push_upstream("develop", "dev.txt", "dev\n");
-            env.git(&["switch", "--quiet", "--create", "feature"]);
             env.write("feature.rs", "fn f() {}\n");
-            let (stdout, _) = env.succeed(&["code", "ship", "--into", "develop"], &[]);
-            assert_eq!(stdout, "https://example.com/pr/1\n");
-            let calls = env.gh_calls();
-            assert!(
-                calls
-                    .iter()
-                    .any(|call| call.starts_with("pr create --base develop --head feature ")),
-                "{calls:?}"
-            );
+            let missing = env.origin.path().join("missing");
+            env.git(&["remote", "set-url", "origin", missing.to_str().unwrap()]);
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(stderr.contains("missing"), "{stderr}");
+            assert_rejected(&env);
         }
 
         #[test]
-        fn a_branch_name_taken_on_the_remote_changes_nothing() {
+        fn a_branch_without_commits_is_rejected_up_front() {
             let env = Env::new();
-            let start = env.git(&["rev-parse", "HEAD"]);
-            env.push_upstream("add-feature", "other.txt", "other\n");
+            env.git(&["switch", "--quiet", "--orphan", "fresh"]);
             env.write("feature.rs", "fn f() {}\n");
             let stderr = env.fail(&["code", "ship"], &[]);
             assert!(
-                stderr.contains(
-                    "error: claude wrote an unusable pull request: origin already has a branch \
-                     named add-feature\nResume: claude --resume "
-                ),
+                stderr.contains("error: the current branch in ")
+                    && stderr.contains(" has no history in common with origin/main"),
                 "{stderr}"
             );
-            assert_eq!(env.git(&["branch", "--show-current"]), "main");
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
-            assert_eq!(env.git(&["status", "--porcelain"]), "?? feature.rs");
+            assert_rejected(&env);
         }
 
         #[test]
@@ -612,24 +515,13 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
             let env = Env::new();
             let stderr = env.fail(&["code", "ship"], &[]);
             assert!(
-                stderr.contains("error: there is nothing to ship in ",)
+                stderr.contains("error: there is nothing to ship in ")
                     && stderr.contains(
                         ": no uncommitted changes and no commits that are not on origin/main"
                     ),
                 "{stderr}"
             );
-            assert_eq!(env.count("ship"), 0);
-        }
-
-        fn assert_nothing_shipped(env: &Env, head: &str) {
-            assert_eq!(env.count("ship"), 0);
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), head);
-            assert_eq!(env.origin_ref("refs/heads/feature"), None);
-            assert!(
-                !env.gh_calls().iter().any(|call| call.starts_with("pr ")),
-                "{:?}",
-                env.gh_calls()
-            );
+            assert_rejected(&env);
         }
 
         #[test]
@@ -659,7 +551,8 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                 stderr.contains("error: a merge is already in progress in "),
                 "{stderr}"
             );
-            assert_nothing_shipped(&env, &head);
+            assert_rejected(&env);
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), head);
         }
 
         #[test]
@@ -669,7 +562,7 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
             env.write("README.md", "stashed\n");
             env.git(&["stash", "--quiet"]);
             env.write("README.md", "feature\n");
-            let head = env.commit("Feature.");
+            env.commit("Feature.");
             let pop = Command::new("git")
                 .args(["stash", "pop"])
                 .current_dir(env.work.path())
@@ -684,19 +577,7 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                 ),
                 "{stderr}"
             );
-            assert_nothing_shipped(&env, &head);
-        }
-
-        #[test]
-        fn a_logged_out_gh_is_rejected_up_front() {
-            let env = Env::new();
-            env.write("feature.rs", "fn f() {}\n");
-            let stderr = env.fail(&["code", "ship"], &[("FAKE_GH_LOGGED_OUT", "1")]);
-            assert!(
-                stderr.contains("error: gh is not logged in; run `gh auth login`"),
-                "{stderr}"
-            );
-            assert_eq!(env.count("ship"), 0);
+            assert_rejected(&env);
         }
 
         #[test]
@@ -712,6 +593,14 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
         }
 
         #[test]
+        fn a_missing_agent_is_rejected_up_front() {
+            let env = Env::with(&["gh"]);
+            env.write("feature.rs", "fn f() {}\n");
+            failed(&env.ncli(&["code", "ship"], &[]), Error::MISSING_EXECUTABLE);
+            assert!(env.gh_calls().is_empty());
+        }
+
+        #[test]
         fn outside_a_git_repository_is_rejected_up_front() {
             let env = Env::new();
             let elsewhere = TempDir::new().unwrap();
@@ -723,39 +612,7 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
                 stderr.contains("error: the current directory is not in a git work tree"),
                 "{stderr}"
             );
-            assert!(env.gh_calls().is_empty());
-        }
-
-        #[test]
-        fn an_unusable_branch_name_changes_nothing_and_can_be_resumed() {
-            let env = Env::new();
-            env.write("feature.rs", "fn f() {}\n");
-            let stderr = env.fail(&["code", "ship"], &[("FAKE_BRANCH", "bad..name")]);
-            assert!(
-                stderr.contains(
-                    "error: claude wrote an unusable pull request: `bad..name` is not a valid \
-                     branch name\nResume: claude --resume "
-                ),
-                "{stderr}"
-            );
-            assert_eq!(env.git(&["branch", "--show-current"]), "main");
-            assert_eq!(env.git(&["status", "--porcelain"]), "?? feature.rs");
-            assert_eq!(env.gh_calls(), ["auth status"]);
-        }
-
-        #[test]
-        fn an_agent_that_edits_files_ships_nothing() {
-            let env = Env::new();
-            env.write("feature.rs", "fn f() {}\n");
-            let edit = ("FAKE_SHIP", "echo more >> feature.rs");
-            let stderr = env.fail(&["code", "ship"], &[edit]);
-            assert!(
-                stderr.contains("error: claude changed the files in ")
-                    && stderr.contains("nothing was committed or pushed"),
-                "{stderr}"
-            );
-            assert_eq!(env.git(&["rev-list", "--count", "HEAD"]), "1");
-            assert_eq!(env.origin_ref("refs/heads/add-feature"), None);
+            assert_rejected(&env);
         }
     }
 
@@ -904,10 +761,35 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
     mod sync {
         use super::*;
 
+        const UNFINISHED: &str = "error: claude did not finish rebasing feature onto origin/main: ";
+
         fn feature(env: &Env, path: &str, contents: &str) -> String {
             env.git(&["switch", "--quiet", "--create", "feature"]);
             env.write(path, contents);
             env.commit("Feature.")
+        }
+
+        // A branch whose commit changes README.md, which main changes too.
+        fn conflicting(env: &Env) -> (String, String) {
+            let old = feature(env, "README.md", "feature\n");
+            let upstream = env.push_upstream("main", "README.md", "upstream\n");
+            (old, upstream)
+        }
+
+        fn assert_restored(env: &Env, old: &str) {
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
+            assert_eq!(env.git(&["rev-parse", "feature"]), old);
+            assert_eq!(env.git(&["branch", "--show-current"]), "feature");
+            assert!(!env.rebasing());
+        }
+
+        fn assert_unfinished(stderr: &str, problem: &str) {
+            assert!(
+                stderr.contains(&format!(
+                    "{UNFINISHED}{problem}: resolve report 1\nResume: claude --resume "
+                )),
+                "{stderr}"
+            );
         }
 
         #[test]
@@ -928,6 +810,32 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
         }
 
         #[test]
+        fn an_up_to_date_branch_is_left_as_it_is() {
+            let env = Env::new();
+            let old = feature(&env, "feature.rs", "fn f() {}\n");
+            let (stdout, _) = env.succeed(&["code", "sync"], &[]);
+            assert_eq!(
+                stdout,
+                format!("feature is up to date with origin/main, at {old}.\n")
+            );
+            assert_eq!(env.count("resolve"), 0);
+        }
+
+        #[test]
+        fn the_default_branch_is_asked_of_the_remote_when_it_is_not_recorded_locally() {
+            let env = Env::new();
+            env.git(&["remote", "set-head", "origin", "--delete"]);
+            feature(&env, "feature.rs", "fn f() {}\n");
+            let upstream = env.push_upstream("main", "README.md", "upstream\n");
+            let (stdout, _) = env.succeed(&["code", "sync"], &[]);
+            assert!(
+                stdout.starts_with("Rebased feature onto origin/main, "),
+                "{stdout}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), upstream);
+        }
+
+        #[test]
         fn a_branch_is_rebased_onto_the_named_branch() {
             let env = Env::new();
             feature(&env, "feature.rs", "fn f() {}\n");
@@ -941,30 +849,35 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
         }
 
         #[test]
-        fn a_from_branch_missing_from_the_remote_is_rejected_up_front() {
+        fn a_rebase_that_fails_without_conflicts_is_an_error_without_the_agent() {
             let env = Env::new();
             let old = feature(&env, "feature.rs", "fn f() {}\n");
-            let stderr = env.fail(&["code", "sync", "--from", "nope"], &[]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            script(
+                &env.work.path().join(".git/hooks"),
+                "pre-rebase",
+                "#!/bin/sh\nexit 1\n",
+            );
+            let stderr = env.fail(&["code", "sync"], &[]);
             assert!(
-                stderr.contains("error: no remote has a branch named nope"),
+                stderr.contains("The pre-rebase hook refused to rebase."),
                 "{stderr}"
             );
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
+            assert_eq!(env.count("resolve"), 0);
+            assert_restored(&env, &old);
         }
 
         #[test]
-        fn conflicts_are_resolved_by_the_agent_and_the_rebase_continues() {
+        fn conflicts_are_resolved_by_the_agent_which_finishes_the_rebase() {
             let env = Env::new();
-            feature(&env, "README.md", "feature\n");
-            let upstream = env.push_upstream("main", "README.md", "upstream\n");
+            let (_, upstream) = conflicting(&env);
             let (stdout, _) = env.succeed(&["code", "sync"], &[]);
             assert!(
                 stdout.starts_with("Rebased feature onto origin/main, "),
                 "{stdout}"
             );
             assert!(
-                stdout.contains("\n\nResolved the conflicts in README.md while applying ")
-                    && stdout.contains(" Feature.:\n\nresolve report 1\n\nResume: "),
+                stdout.contains(".\n\nResolved the conflicts:\n\nresolve report 1\n\nResume: "),
                 "{stdout}"
             );
             assert_eq!(
@@ -977,268 +890,235 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
             assert!(!env.rebasing());
             let prompt = env.logged("resolve.1").unwrap();
             assert!(
-                prompt.contains("these files by editing them: README.md."),
+                prompt.contains(
+                    "A rebase of the branch feature onto origin/main in the repository at "
+                ),
                 "{prompt}"
             );
-            assert!(prompt.contains(" Feature."), "{prompt}");
             assert!(
-                prompt.contains("Do not stage, commit, or run git rebase"),
+                prompt.contains("`GIT_EDITOR=: git rebase --continue`, until the rebase is done"),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains("Do not switch branches, reset, stash, or push."),
                 "{prompt}"
             );
         }
 
         #[test]
-        fn conflicts_outside_the_sparse_checkout_are_resolved() {
+        fn every_conflicting_commit_is_resolved_in_one_agent_run() {
             let env = Env::new();
             feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            env.git(&["sparse-checkout", "set", "--no-cone", "/feature.rs"]);
+            env.write("README.md", "more\n");
+            env.commit("More.");
+            let upstream = env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "for _ in 1 2 3; do [ -d .git/rebase-merge ] || break; \
+                git rev-parse REBASE_HEAD > README.md; git add README.md; \
+                GIT_EDITOR=: git rebase --continue; done";
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert_eq!(env.count("resolve"), 1);
+            assert_eq!(env.git(&["rev-parse", "HEAD~2"]), upstream);
+            assert_eq!(env.git(&["log", "-2", "--format=%s"]), "More.\nFeature.");
+            assert!(!env.rebasing());
+        }
+
+        #[test]
+        fn marker_like_lines_in_files_the_branch_does_not_change_are_allowed() {
+            let env = Env::new();
+            feature(&env, "README.md", "feature\n");
+            env.change_upstream("main", |clone| {
+                fs::write(clone.join("README.md"), "upstream\n").unwrap();
+                fs::write(clone.join("sample.txt"), "<<<<<<< sample\n").unwrap();
+            });
             env.succeed(&["code", "sync"], &[]);
-            assert_eq!(env.git(&["show", "HEAD:README.md"]), "resolved");
-            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "Feature.");
-            assert!(!env.rebasing());
-        }
-
-        #[cfg(unix)]
-        #[test]
-        fn conflicts_in_files_named_like_pathspecs_are_resolved() {
-            let env = Env::new();
-            feature(&env, ":foo", "feature\n");
-            env.push_upstream("main", ":foo", "upstream\n");
-            let resolve = ("FAKE_RESOLVE", "printf 'resolved\\n' > ./:foo");
-            env.succeed(&["code", "sync"], &[resolve]);
-            assert_eq!(
-                fs::read_to_string(env.work.path().join(":foo")).unwrap(),
-                "resolved\n"
-            );
-            assert_eq!(env.git(&["status", "--porcelain"]), "");
             assert!(!env.rebasing());
         }
 
         #[test]
-        fn unresolved_conflicts_abort_the_rebase() {
+        fn a_rebase_the_agent_leaves_unfinished_puts_the_branch_back() {
             let env = Env::new();
-            let old = feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
+            let (old, _) = conflicting(&env);
             let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", "true")]);
-            let short = env.git(&["rev-parse", "--short", &old]);
-            assert!(
-                stderr.contains(&format!(
-                    "error: the conflicts in README.md were left unresolved while applying \
-                     {short} Feature., so the rebase was aborted: resolve report 1\nResume: \
-                     claude --resume "
-                )),
-                "{stderr}"
-            );
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
-            assert_eq!(env.git(&["branch", "--show-current"]), "feature");
+            assert_unfinished(&stderr, "a rebase is still in progress");
+            assert_restored(&env, &old);
             assert_eq!(env.git(&["status", "--porcelain"]), "");
-            assert!(!env.rebasing());
-        }
-
-        fn assert_restored(env: &Env, old: &str) {
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
-            assert_eq!(env.git(&["branch", "--show-current"]), "feature");
-            assert_eq!(env.git(&["status", "--porcelain"]), "");
-            assert!(!env.rebasing());
-        }
-
-        fn delete_upstream_readme(env: &Env) {
-            env.change_upstream("main", |clone| {
-                fs::remove_file(clone.join("README.md")).unwrap()
-            });
         }
 
         #[test]
-        fn a_conflict_without_markers_left_as_it_was_aborts_the_rebase() {
+        fn a_rebase_the_agent_aborts_is_an_error() {
             let env = Env::new();
-            let old = feature(&env, "README.md", "feature\n");
-            delete_upstream_readme(&env);
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", "true")]);
-            assert!(
-                stderr.contains("error: the conflicts in README.md were left unresolved"),
-                "{stderr}"
-            );
+            let (old, _) = conflicting(&env);
+            let abort = ("FAKE_RESOLVE", "git rebase --abort");
+            let stderr = env.fail(&["code", "sync"], &[abort]);
+            assert_unfinished(&stderr, "origin/main is not in the history of the branch");
             assert_restored(&env, &old);
         }
 
         #[test]
-        fn a_conflict_without_markers_is_resolved_by_changing_the_file() {
+        fn an_agent_that_leaves_the_branch_puts_the_branch_back() {
             let env = Env::new();
-            feature(&env, "README.md", "feature\n");
-            delete_upstream_readme(&env);
-            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", "rm README.md")]);
-            assert!(!env.work.path().join("README.md").exists());
-            assert!(!env.rebasing());
-        }
-
-        #[test]
-        fn a_conflict_without_markers_is_resolved_by_keeping_the_file() {
-            let env = Env::new();
-            feature(&env, "README.md", "feature\n");
-            delete_upstream_readme(&env);
-            env.succeed(
-                &["code", "sync"],
-                &[("FAKE_RESOLVE", "true"), ("FAKE_KEPT", "\"README.md\"")],
+            let (old, _) = conflicting(&env);
+            let detach = (
+                "FAKE_RESOLVE",
+                "eval \"$RESOLVE\" && git switch --quiet --detach",
             );
-            assert_eq!(
-                fs::read_to_string(env.work.path().join("README.md")).unwrap(),
-                "feature\n"
-            );
-            assert_eq!(env.git(&["status", "--porcelain"]), "");
-            assert!(!env.rebasing());
-            let prompt = env.logged("resolve.1").unwrap();
-            assert!(prompt.contains("List in kept"), "{prompt}");
-        }
-
-        #[test]
-        fn a_binary_conflict_is_resolved_by_keeping_the_file() {
-            let env = Env::new();
-            env.write(".gitattributes", "*.bin binary\n");
-            env.write("data.bin", "start\n");
-            env.commit("Data.");
-            env.git(&["push", "--quiet", "origin", "main"]);
-            feature(&env, "data.bin", "feature\n");
-            env.push_upstream("main", "data.bin", "upstream\n");
-            let kept = [("FAKE_RESOLVE", "true"), ("FAKE_KEPT", "\"data.bin\"")];
-            env.succeed(&["code", "sync"], &kept);
-            assert_eq!(
-                fs::read_to_string(env.work.path().join("data.bin")).unwrap(),
-                "upstream\n"
-            );
-            assert_eq!(env.git(&["status", "--porcelain"]), "");
-            assert!(!env.rebasing());
-        }
-
-        // A submodule the branch moves to one commit while main moves it to another.
-        fn submodule_conflict(env: &Env) -> (TempDir, String, String) {
-            let sub = TempDir::new().unwrap();
-            git(sub.path(), &["init", "--quiet", "--initial-branch", "main"]);
-            let commit = |message: &str| {
-                git(
-                    sub.path(),
-                    &["commit", "--quiet", "--allow-empty", "--message", message],
-                );
-                git(sub.path(), &["rev-parse", "HEAD"])
-            };
-            commit("Start.");
-            let ours = commit("Ours.");
-            git(sub.path(), &["reset", "--quiet", "--hard", "HEAD~1"]);
-            let theirs = commit("Theirs.");
-            git(sub.path(), &["branch", "ours", &ours]);
-            git(sub.path(), &["reset", "--quiet", "--hard", "HEAD~1"]);
-            let source = sub.path().to_str().unwrap();
-            env.git(&[
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "add",
-                "--quiet",
-                source,
-                "sub",
-            ]);
-            env.commit("Submodule.");
-            env.git(&["push", "--quiet", "origin", "main"]);
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            git(
-                &env.work.path().join("sub"),
-                &["checkout", "--quiet", &ours],
-            );
-            env.commit("Feature.");
-            env.change_upstream("main", |clone| {
-                let gitlink = format!("160000,{theirs},sub");
-                git(clone, &["update-index", "--cacheinfo", &gitlink]);
-            });
-            (sub, ours, theirs)
-        }
-
-        #[test]
-        fn a_submodule_conflict_is_resolved_by_checking_out_a_commit() {
-            let env = Env::new();
-            let (_sub, _, theirs) = submodule_conflict(&env);
-            let resolve = format!("git -C sub checkout --quiet {theirs}");
-            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
-            assert_eq!(env.git(&["rev-parse", "HEAD:sub"]), theirs);
-            assert_eq!(env.git(&["status", "--porcelain"]), "");
-            assert!(!env.rebasing());
-            let prompt = env.logged("resolve.1").unwrap();
-            assert!(prompt.contains("A conflicted submodule"), "{prompt}");
-        }
-
-        #[test]
-        fn a_submodule_conflict_is_resolved_by_keeping_its_commit() {
-            let env = Env::new();
-            let (_sub, ours, _) = submodule_conflict(&env);
-            let kept = [("FAKE_RESOLVE", "true"), ("FAKE_KEPT", "\"sub\"")];
-            env.succeed(&["code", "sync"], &kept);
-            assert_eq!(env.git(&["rev-parse", "HEAD:sub"]), ours);
-            assert!(!env.rebasing());
-        }
-
-        #[test]
-        fn a_submodule_conflict_left_as_it_was_aborts_the_rebase() {
-            let env = Env::new();
-            let (_sub, _, _) = submodule_conflict(&env);
-            let old = env.git(&["rev-parse", "HEAD"]);
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", "true")]);
+            let stderr = env.fail(&["code", "sync"], &[detach]);
             assert!(
-                stderr.contains("error: the conflicts in sub were left unresolved"),
+                stderr.contains(&format!("{UNFINISHED}HEAD is now a detached HEAD at ")),
                 "{stderr}"
             );
+            assert!(stderr.contains("Resume: claude --resume "), "{stderr}");
             assert_restored(&env, &old);
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
         }
 
         #[test]
-        fn longer_conflict_markers_are_left_unresolved() {
+        fn uncommitted_changes_left_by_the_agent_put_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let scratch = (
+                "FAKE_RESOLVE",
+                "eval \"$RESOLVE\" && echo scratch > scratch.txt",
+            );
+            let stderr = env.fail(&["code", "sync"], &[scratch]);
+            assert_unfinished(
+                &stderr,
+                "the working tree has uncommitted changes (scratch.txt)",
+            );
+            assert_restored(&env, &old);
+            assert_eq!(env.git(&["status", "--porcelain"]), "?? scratch.txt");
+        }
+
+        const MARKED: &str = "printf '<<<<<<< HEAD\\nx\\n=======\\ny\\n>>>>>>> c\\n' > README.md \
+            && git add README.md && GIT_EDITOR=: git rebase --continue";
+
+        #[test]
+        fn committed_conflict_markers_put_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", MARKED)]);
+            assert_unfinished(&stderr, "conflict markers are left in README.md");
+            assert_restored(&env, &old);
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+        }
+
+        #[test]
+        fn longer_conflict_markers_are_found() {
             let env = Env::new();
             env.write(".gitattributes", "README.md conflict-marker-size=10\n");
             env.commit("Attributes.");
             env.git(&["push", "--quiet", "origin", "main"]);
-            let old = feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            let marked =
-                "printf '<<<<<<<<<< HEAD\\nx\\n==========\\ny\\n>>>>>>>>>> c\\n' > README.md";
+            let (old, _) = conflicting(&env);
+            let marked = "printf '<<<<<<<<<< HEAD\\nx\\n==========\\ny\\n>>>>>>>>>> c\\n' \
+                > README.md && git add README.md && GIT_EDITOR=: git rebase --continue";
             let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", marked)]);
-            assert!(
-                stderr.contains("error: the conflicts in README.md were left unresolved"),
-                "{stderr}"
-            );
+            assert_unfinished(&stderr, "conflict markers are left in README.md");
             assert_restored(&env, &old);
         }
 
         #[test]
-        fn edits_outside_the_conflicts_abort_the_rebase() {
+        fn conflict_markers_outside_the_sparse_checkout_are_found() {
             let env = Env::new();
-            env.write("notes.txt", "notes\n");
-            let old = feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            let resolve = "printf 'resolved\\n' > README.md; echo edited > notes.txt";
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
-            let short = env.git(&["rev-parse", "--short", &old]);
+            let (old, _) = conflicting(&env);
+            env.git(&["sparse-checkout", "set", "--no-cone", "/feature.rs"]);
+            let marked = MARKED.replace("git add", "git add --sparse");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &marked)]);
+            assert_unfinished(&stderr, "conflict markers are left in README.md");
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn conflicts_in_files_named_like_pathspecs_are_checked() {
+            let env = Env::new();
+            let old = feature(&env, ":foo", "feature\n");
+            env.push_upstream("main", ":foo", "upstream\n");
+            let marked = MARKED.replace("README.md", "./:foo");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &marked)]);
+            assert_unfinished(&stderr, "conflict markers are left in :foo");
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn an_agent_that_cannot_finish_puts_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let stderr = env.fail(
+                &["code", "sync"],
+                &[("FAKE_RESOLVE", "true"), ("FAKE_COMPLETED", "false")],
+            );
+            assert!(
+                stderr.contains(
+                    "error: claude could not finish the task: resolve report 1\nResume: claude \
+                     --resume "
+                ),
+                "{stderr}"
+            );
+            assert_restored(&env, &old);
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+        }
+
+        #[test]
+        fn a_branch_that_cannot_be_put_back_is_reported_with_the_resume_hint() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let lock = ("FAKE_RESOLVE", "touch .git/index.lock");
+            let stderr = env.fail(&["code", "sync"], &[lock]);
             assert!(
                 stderr.contains(&format!(
-                    "error: notes.txt changed outside the conflicts while applying {short} \
-                     Feature., so the rebase was aborted;"
+                    "{UNFINISHED}a rebase is still in progress: resolve report 1\nPutting \
+                     feature back at {old} then failed: "
                 )),
                 "{stderr}"
             );
-            assert_restored(&env, &old);
+            assert!(
+                stderr
+                    .trim_end()
+                    .lines()
+                    .last()
+                    .unwrap()
+                    .starts_with("Resume: claude --resume "),
+                "{stderr}"
+            );
+            assert!(env.rebasing());
         }
 
         #[test]
-        fn staged_edits_outside_the_conflicts_abort_the_rebase() {
+        fn an_interrupted_sync_puts_the_branch_back() {
+            use std::process::Stdio;
+            use std::thread;
+            use std::time::{Duration, Instant};
+
             let env = Env::new();
-            env.write("notes.txt", "notes\n");
-            let old = feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            let resolve =
-                "printf 'resolved\\n' > README.md; echo edited > notes.txt; git add notes.txt";
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            let (old, _) = conflicting(&env);
+            let hang = ("FAKE_RESOLVE", "touch \"$log/resolve.started\"; sleep 30");
+            let sync = env
+                .command(env.work.path(), &["code", "sync"], &[hang])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while env.logged("resolve.started").is_none() {
+                assert!(Instant::now() < deadline, "the agent never started");
+                thread::sleep(Duration::from_millis(20));
+            }
+            unsafe { libc::kill(sync.id() as libc::pid_t, libc::SIGTERM) };
+            let output = sync.wait_with_output().unwrap();
+            assert!(!output.status.success());
+            assert_restored(&env, &old);
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+        }
+
+        #[test]
+        fn a_from_branch_missing_from_the_remote_is_rejected_up_front() {
+            let env = Env::new();
+            let old = feature(&env, "feature.rs", "fn f() {}\n");
+            let stderr = env.fail(&["code", "sync", "--from", "nope"], &[]);
             assert!(
-                stderr.contains("error: notes.txt changed outside the conflicts while applying "),
+                stderr.contains("error: no remote has a branch named nope"),
                 "{stderr}"
             );
-            assert_restored(&env, &old);
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
         }
 
         #[test]
@@ -1258,46 +1138,15 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
         }
 
         #[test]
-        fn new_files_outside_the_conflicts_abort_the_rebase() {
-            let env = Env::new();
-            let old = feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            let resolve = "printf 'resolved\\n' > README.md; echo scratch > scratch.txt";
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
-            assert!(
-                stderr.contains("error: scratch.txt changed outside the conflicts while applying "),
-                "{stderr}"
-            );
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
-            assert_eq!(env.git(&["status", "--porcelain"]), "?? scratch.txt");
-            assert!(!env.rebasing());
-        }
-
-        #[test]
-        fn an_interrupted_sync_aborts_the_rebase() {
-            use std::process::Stdio;
-            use std::thread;
-            use std::time::{Duration, Instant};
-
-            let env = Env::new();
-            let old = feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
-            let hang = ("FAKE_RESOLVE", "touch \"$log/resolve.started\"; sleep 30");
-            let sync = env
-                .command(env.work.path(), &["code", "sync"], &[hang])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while env.logged("resolve.started").is_none() {
-                assert!(Instant::now() < deadline, "the agent never started");
-                thread::sleep(Duration::from_millis(20));
-            }
-            unsafe { libc::kill(sync.id() as libc::pid_t, libc::SIGTERM) };
-            let output = sync.wait_with_output().unwrap();
-            assert!(!output.status.success());
+        fn a_missing_agent_is_rejected_up_front() {
+            let env = Env::with(&["gh"]);
+            let (old, _) = conflicting(&env);
+            failed(&env.ncli(&["code", "sync"], &[]), Error::MISSING_EXECUTABLE);
             assert_restored(&env, &old);
+            assert_eq!(
+                env.git(&["rev-parse", "origin/main"]),
+                env.git(&["rev-parse", "main"])
+            );
         }
 
         #[test]
@@ -1345,10 +1194,20 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
         }
 
         #[test]
+        fn a_branch_without_commits_is_refused() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--orphan", "fresh"]);
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("error: cannot sync fresh with no commits in "),
+                "{stderr}"
+            );
+        }
+
+        #[test]
         fn a_rebase_in_progress_is_refused() {
             let env = Env::new();
-            feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
+            conflicting(&env);
             env.git(&["fetch", "--quiet", "origin"]);
             let rebase = Command::new("git")
                 .args(["rebase", "origin/main"])
@@ -1368,8 +1227,7 @@ cd "$FAKE_SSH_ROOT" && eval "git ${command#git-}"
         #[test]
         fn a_merge_in_progress_is_refused() {
             let env = Env::new();
-            feature(&env, "README.md", "feature\n");
-            env.push_upstream("main", "README.md", "upstream\n");
+            conflicting(&env);
             env.git(&["fetch", "--quiet", "origin"]);
             let merge = Command::new("git")
                 .args([

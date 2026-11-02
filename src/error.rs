@@ -2,7 +2,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::commands::code::review::Change;
-use crate::commands::code::{Head, Operation, RemoteBranch, Unshippable};
+use crate::commands::code::{Head, Operation, RemoteBranch, Unshipped, Unsynced};
 use crate::commands::session::SessionName;
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
@@ -109,36 +109,20 @@ pub enum Error {
         rounds: u32,
         report: String,
     },
-    #[error("gh is not logged in; run `gh auth login`: {0}")]
-    GhUnauthenticated(#[source] ProcessError),
     #[error(
         "there is nothing to ship in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
     )]
     NothingToShip { repo: PathBuf, base: RemoteBranch },
-    #[error("{agent} wrote an unusable pull request: {problem}")]
-    InvalidShipment {
+    #[error("{agent} did not finish shipping to {into}: {problem}: {}", .report.trim())]
+    Unshipped {
         agent: String,
+        into: Box<RemoteBranch>,
         #[source]
-        problem: Unshippable,
+        problem: Box<Unshipped>,
+        report: String,
     },
-    #[error(
-        "{agent} changed the files in {} while writing the pull request; nothing was committed or pushed", .repo.display()
-    )]
-    ChangedWhileShipping { agent: String, repo: PathBuf },
-    #[error("{0} does not name a GitHub repository")]
-    NotAGitHubRemote(String),
-    #[error(
-        "{remote} fetches from {fetch} but pushes to {push}; ship needs both to be the repository the pull request is opened in"
-    )]
-    PushesElsewhere {
-        remote: String,
-        fetch: String,
-        push: String,
-    },
-    #[error("gh listed pull requests in an unexpected format: {0}")]
+    #[error("gh described the pull request in an unexpected format: {0}")]
     GhOutput(#[source] serde_json::Error),
-    #[error("gh created the pull request but printed no URL")]
-    NoPullRequestUrl,
     #[error("{agent} left no changes in {} to fix the check: {}", .repo.display(), .report.trim())]
     NothingFixed {
         agent: String,
@@ -173,31 +157,22 @@ pub enum Error {
         "the working tree in {} has uncommitted changes ({paths}); commit or stash them first", .repo.display()
     )]
     DirtyWorktree { repo: PathBuf, paths: String },
-    #[error(
-        "the conflicts in {paths} were left unresolved while applying {commit}, so the rebase was aborted: {}", .report.trim()
-    )]
-    UnresolvedConflicts {
-        commit: String,
-        paths: String,
+    #[error("{agent} did not finish rebasing {branch} onto {from}: {problem}: {}", .report.trim())]
+    Unsynced {
+        agent: String,
+        branch: String,
+        from: Box<RemoteBranch>,
+        #[source]
+        problem: Box<Unsynced>,
         report: String,
     },
-    #[error(
-        "{paths} changed outside the conflicts while applying {commit}, so the rebase was aborted; only the conflicted files may be edited: {}", .report.trim()
-    )]
-    EditedOutsideConflicts {
-        commit: String,
-        paths: String,
-        report: String,
-    },
-    #[error(
-        "{error}\n`git rebase --abort` then failed, so the rebase is still in progress: {abort}"
-    )]
-    RebaseNotAborted {
+    #[error("{error}\nPutting {branch} back at {old} then failed: {restore}")]
+    NotRestored {
         error: Box<Error>,
-        abort: Box<ProcessError>,
+        branch: String,
+        old: String,
+        restore: Box<ProcessError>,
     },
-    #[error("could not read the conflicted file {}: {source}", .path.display())]
-    ReadConflicted { path: PathBuf, source: io::Error },
     #[error("{0} wrote no document")]
     NothingWritten(String),
     #[error("could not read the document at {}: {source}", .path.display())]
@@ -285,7 +260,7 @@ impl Error {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,
             Self::EmptyTask | Self::NotATask(_) => Self::USAGE,
-            Self::Resumable { source, .. } | Self::RebaseNotAborted { error: source, .. } => {
+            Self::Resumable { source, .. } | Self::NotRestored { error: source, .. } => {
                 source.exit_code()
             }
             Self::WorkingDirectory(_)
@@ -309,14 +284,9 @@ impl Error {
             | Self::NothingImplemented { .. }
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
-            | Self::GhUnauthenticated(_)
             | Self::NothingToShip { .. }
-            | Self::InvalidShipment { .. }
-            | Self::ChangedWhileShipping { .. }
-            | Self::NotAGitHubRemote(_)
-            | Self::PushesElsewhere { .. }
+            | Self::Unshipped { .. }
             | Self::GhOutput(_)
-            | Self::NoPullRequestUrl
             | Self::NothingFixed { .. }
             | Self::StillFailing { .. }
             | Self::CheckMovedHead { .. }
@@ -324,9 +294,7 @@ impl Error {
             | Self::UnmergedPaths { .. }
             | Self::NotOnABranch { .. }
             | Self::DirtyWorktree { .. }
-            | Self::UnresolvedConflicts { .. }
-            | Self::EditedOutsideConflicts { .. }
-            | Self::ReadConflicted { .. }
+            | Self::Unsynced { .. }
             | Self::NothingWritten(_)
             | Self::ReadDoc { .. }
             | Self::NoDocReview
