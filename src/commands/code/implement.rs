@@ -52,6 +52,7 @@ impl Implement {
             }
             if round == self.max_rounds {
                 return Err(Error::Unsettled {
+                    remaining: verdict.count(),
                     rounds: round,
                     report: summary(context, &steps, &verdict),
                 });

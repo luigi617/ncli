@@ -194,6 +194,19 @@ fn an_empty_document_is_a_usage_error_before_any_agent_runs() {
 }
 
 #[test]
+fn a_missing_path_is_a_usage_error_before_any_agent_runs() {
+    let env = Env::new();
+    let output = env.run(&["review", "notes.mdd"], &[]);
+    assert_eq!(output.status.code(), Some(Error::USAGE.into()));
+    assert!(
+        stderr(&output).contains("no file at notes.mdd"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(env.count("review"), 0);
+}
+
+#[test]
 fn a_review_that_cannot_read_the_document_fails() {
     let env = Env::new();
     script(
@@ -228,7 +241,9 @@ fn fix_addresses_the_last_review_of_a_text_document() {
         "{prompt}"
     );
     assert!(prompt.contains("<document>\nWe ship on Monday.\n</document>"));
-    assert!(prompt.contains("Put in report only the whole revised document"));
+    assert!(prompt.contains(
+        "Do not create or change any file. Put in report only the whole revised document"
+    ));
 }
 
 #[test]
@@ -411,12 +426,35 @@ fn write_that_never_settles_is_an_error_that_says_how_to_resume() {
     assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
     let stderr = stderr(&output);
     assert!(
-        stderr.contains("the review still has findings after 2 round(s)"),
+        stderr.contains("the review still has 1 problem after 2 round(s)"),
         "{stderr}"
     );
     assert!(stderr.contains("# Draft 3"), "{stderr}");
-    assert!(stderr.contains("\nResume: claude --resume "), "{stderr}");
+    assert_eq!(
+        stderr.matches("\nResume: claude --resume ").count(),
+        1,
+        "{stderr}"
+    );
     assert_eq!((env.count("review"), env.count("fix")), (2, 2));
+}
+
+#[test]
+fn a_failed_write_drops_the_review_of_an_earlier_run() {
+    let env = Env::new();
+    env.succeed(&["review", "We ship on Monday."], &[]);
+    let output = env.run(
+        &["write", "a launch note", "--max-rounds", "1"],
+        &[("FAKE_PROBLEM_ROUNDS", "99")],
+    );
+    assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+    let output = env.run(&["fix"], &[]);
+    assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+    assert!(
+        stderr(&output).contains("the last output is not a document review"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(env.count("fix"), 1);
 }
 
 #[test]

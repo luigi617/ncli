@@ -10,7 +10,7 @@ use crate::error::Error;
 #[derive(Debug, Args)]
 pub struct Fix {
     /// URL of the document, or of one of its comments [default: the last output, from `ncli doc
-    /// review`]
+    /// review` or `ncli doc write`]
     #[arg(value_parser = parse_link)]
     pub link: Option<String>,
     #[command(flatten)]
@@ -39,8 +39,8 @@ impl Fix {
 
 pub(super) fn task(doc: &Doc, feedback: &str) -> String {
     let result = match doc {
-        Doc::Text(_) => "Put in report only the whole revised document, in Markdown, with nothing \
-                         before or after it."
+        Doc::Text(_) => "Do not create or change any file. Put in report only the whole revised \
+                         document, in Markdown, with nothing before or after it."
             .to_owned(),
         Doc::Link(_) | Doc::Path(_) => format!(
             "Edit {doc} in place with the tools you have. In report, say for each comment whether \

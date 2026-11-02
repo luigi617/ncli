@@ -88,9 +88,13 @@ pub enum Error {
         to: Box<Head>,
     },
     #[error(
-        "the review still has findings after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
+        "the review still has {remaining} after {rounds} round(s), and the changes made to address them were not reviewed:\n\n{report}"
     )]
-    Unsettled { rounds: u32, report: String },
+    Unsettled {
+        remaining: String,
+        rounds: u32,
+        report: String,
+    },
     #[error("{0} wrote no document")]
     NothingWritten(String),
     #[error("could not read the document at {}: {source}", .path.display())]

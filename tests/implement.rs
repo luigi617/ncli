@@ -283,7 +283,7 @@ esac
         let stderr = env.fail(&["--max-rounds", "2"], &[FINDINGS]);
         assert!(
             stderr.contains(
-                "ncli code implement: error: the review still has findings after 2 round(s), \
+                "ncli code implement: error: the review still has 1 finding after 2 round(s), \
                  and the changes made to address them were not reviewed:"
             ),
             "{stderr}"
@@ -304,7 +304,7 @@ esac
         let implement = ("FAKE_IMPLEMENT", "echo 'fn g() {}' >> feature.rs");
         let failure = env.fail(&["--max-rounds", "1"], &[FINDINGS, implement]);
         assert!(
-            failure.contains("the review still has findings"),
+            failure.contains("the review still has 1 finding"),
             "{failure}"
         );
         assert!(!env.saved("review.json"));

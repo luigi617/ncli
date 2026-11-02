@@ -48,10 +48,11 @@ fn parse_doc(doc: &str) -> Result<Doc, String> {
     if let Ok(link) = parse_link(doc) {
         return Ok(Doc::Link(link));
     }
-    Ok(match fs::canonicalize(doc) {
-        Ok(path) if path.is_file() => Doc::Path(path),
-        _ => Doc::Text(doc.to_owned()),
-    })
+    match fs::canonicalize(doc) {
+        Ok(path) if path.is_file() => Ok(Doc::Path(path)),
+        _ if !doc.contains(char::is_whitespace) => Err(format!("no file at {doc}")),
+        _ => Ok(Doc::Text(doc.to_owned())),
+    }
 }
 
 impl Doc {

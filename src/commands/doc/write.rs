@@ -10,6 +10,7 @@ use super::{Doc, fix};
 use crate::agent::{Agent, AgentKind, Performed, task_schema};
 use crate::commands::{Context, Output, parse_link, task};
 use crate::error::Error;
+use crate::state::{self, Entry};
 
 static SCHEMA: LazyLock<String> =
     LazyLock::new(|| task_schema(include_str!("written.schema.json")));
@@ -31,6 +32,7 @@ pub struct Write {
 impl Write {
     pub fn run(&self, context: &Context) -> Result<Output, Error> {
         let task = task::trimmed(&self.task)?;
+        state::remove(Entry::DocReview)?;
         let agent = AgentKind::first_available()?;
         context.progress("writing");
         let (written, document) =
@@ -69,10 +71,10 @@ impl Write {
             }
             if round == self.max_rounds {
                 return Err(Error::Unsettled {
+                    remaining: assessment.count(),
                     rounds: round,
                     report: summary(context, &revised, &steps, &assessment),
-                }
-                .resumable(&last(&steps).resume));
+                });
             }
             doc = revised;
             round += 1;
