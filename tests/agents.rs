@@ -563,6 +563,7 @@ esac
         assert!(prompt.contains(&link));
         assert!(prompt.contains("Do not commit, do not push"));
         assert!(prompt.contains("Address it only if it is correct and worth the change"));
+        assert!(prompt.contains(ncli::agent::STYLE.trim_end()));
         assert!(!prompt.contains("<context>"));
         assert_eq!(
             Path::new(env.logged("claude.cwd").unwrap().trim()),

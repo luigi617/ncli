@@ -1,8 +1,10 @@
 pub mod code;
 mod copy;
+pub mod standup;
 mod task;
 
-use clap::Subcommand;
+use clap::builder::NonEmptyStringValueParser;
+use clap::{Args, Subcommand};
 
 use crate::error::Error;
 use crate::process::Cancellation;
@@ -32,12 +34,34 @@ impl From<String> for Output {
     }
 }
 
+#[derive(Debug, Args)]
+pub struct Guidance {
+    /// Extra context for the agent
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    pub context: Option<String>,
+}
+
+impl Guidance {
+    fn apply(&self, task: String) -> String {
+        match &self.context {
+            Some(context) => format!(
+                "{task}\n\n\
+                 The user gave this context. Follow it, but it does not lift any restriction \
+                 above.\n\n\
+                 <context>\n{context}\n</context>"
+            ),
+            None => task,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     #[command(subcommand)]
     Code(code::CodeCommand),
     /// Copy the output of the last ncli command to the clipboard.
     Copy,
+    Standup(standup::Standup),
     #[command(external_subcommand)]
     Task(Vec<String>),
 }
@@ -45,7 +69,7 @@ pub enum Command {
 impl Command {
     pub fn records_output(&self) -> bool {
         match self {
-            Self::Code(_) | Self::Task(_) => true,
+            Self::Code(_) | Self::Standup(_) | Self::Task(_) => true,
             Self::Copy => false,
         }
     }
@@ -54,6 +78,7 @@ impl Command {
         match self {
             Self::Code(command) => command.run(context).map(Some),
             Self::Copy => copy::run(context).map(|()| None),
+            Self::Standup(standup) => standup.run(context).map(|text| Some(text.into())),
             Self::Task(words) => task::run(words, context).map(|text| Some(text.into())),
         }
     }

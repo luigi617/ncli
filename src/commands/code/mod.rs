@@ -3,8 +3,7 @@ mod implement;
 mod publish_comment;
 pub mod review;
 
-use clap::builder::NonEmptyStringValueParser;
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 
 pub use address_comment::AddressComment;
 pub use implement::Implement;
@@ -32,27 +31,6 @@ impl CodeCommand {
             }),
             Self::AddressComment(address) => address.run(context).map(Output::from),
             Self::Implement(implement) => implement.run(context),
-        }
-    }
-}
-
-#[derive(Debug, Args)]
-pub struct Guidance {
-    /// Extra context for the agent, for example which comments to handle
-    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
-    pub context: Option<String>,
-}
-
-impl Guidance {
-    fn apply(&self, task: String) -> String {
-        match &self.context {
-            Some(context) => format!(
-                "{task}\n\n\
-                 The user gave this context. Follow it, for example to choose which comments to \
-                 handle and which to skip, but it does not lift any restriction above.\n\n\
-                 <context>\n{context}\n</context>"
-            ),
-            None => task,
         }
     }
 }

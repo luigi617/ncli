@@ -13,7 +13,7 @@ pub use change::{Base, Change, Head, RemoteBranch, Worktree};
 pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
 use super::parse_link;
-use crate::agent::{Agent, AgentKind};
+use crate::agent::{Agent, AgentKind, WORKDIR};
 use crate::commands::{Context, Output};
 use crate::error::Error;
 use crate::process::{self, Cancellation};
@@ -108,7 +108,7 @@ fn ask(
     cancellation: &Cancellation,
 ) -> Result<String, Error> {
     let workdir = tempfile::Builder::new()
-        .prefix("ncli-review-")
+        .prefix(&format!("{WORKDIR}review-"))
         .tempdir()
         .map_err(Error::WorkingDirectory)?;
     reviewer.ask(prompt, schema, Some(workdir.path()), cancellation)

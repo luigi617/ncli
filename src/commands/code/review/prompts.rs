@@ -1,4 +1,5 @@
 use super::Change;
+use crate::agent::STYLE;
 
 const SCRATCH: &str = "Your current directory is an empty scratch directory: write any test, script, or \
                        checkout there, and do not modify the repository or the change, and do not post \
@@ -58,7 +59,7 @@ pub fn judge(change: &Change, task: Option<&str>, debate: &str) -> String {
          finding, give the file and the most relevant line, a short title, a one or two sentence \
          explanation of what is wrong, how a bug was reproduced, and why it matters, and a one \
          sentence fix. Set change_accessed to false, with no findings, if you or any reviewer could \
-         not access the change.",
+         not access the change. For the title, explanation, and fix: {STYLE}",
         change.access(),
         stated(task)
     )

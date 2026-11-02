@@ -1,8 +1,9 @@
+use std::env;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use clap::ValueEnum;
@@ -11,6 +12,10 @@ use uuid::Uuid;
 
 use crate::error::Error;
 use crate::process::{self, Cancellation, Cli, NoExecutable, ProcessError, StderrTracer};
+
+pub const STYLE: &str = include_str!("agent/style.md");
+
+pub const WORKDIR: &str = "ncli-";
 
 pub static TASK_SCHEMA: LazyLock<String> =
     LazyLock::new(|| schema(include_str!("agent/task.schema.json")));
@@ -63,12 +68,33 @@ impl AgentKind {
         }
     }
 
+    // Claude nests a session's subagents below it, and they repeat its work.
+    pub fn sessions(self) -> Option<Sessions> {
+        let (var, home, dir, depth) = match self {
+            Self::Claude => ("CLAUDE_CONFIG_DIR", ".claude", "projects", Some(2)),
+            Self::Codex => ("CODEX_HOME", ".codex", "sessions", None),
+        };
+        let root = env::var_os(var)
+            .filter(|root| !root.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home_dir| home_dir.join(home)))?;
+        Some(Sessions {
+            dir: root.join(dir),
+            depth,
+        })
+    }
+
     pub fn first_available() -> Result<Agent, NoExecutable> {
         process::first_available(
             Self::value_variants().iter().map(|kind| kind.agent()),
             |agent| agent.cli.executable(),
         )
     }
+}
+
+pub struct Sessions {
+    pub dir: PathBuf,
+    pub depth: Option<usize>,
 }
 
 pub enum SchemaArg {
@@ -216,7 +242,7 @@ impl Agent {
         cancellation: &Cancellation,
     ) -> Result<String, Error> {
         let workdir = tempfile::Builder::new()
-            .prefix("ncli-")
+            .prefix(WORKDIR)
             .tempdir()
             .map_err(Error::WorkingDirectory)?;
         self.attempt(task, Some(workdir.path()), cancellation)
@@ -233,7 +259,8 @@ impl Agent {
         let prompt = format!(
             "{task}\n\n\
              When you are done, answer as JSON matching the given schema. Set completed to false if \
-             you could not finish the task, and put in report the answer, or what you did and why."
+             you could not finish the task, and put in report the answer, or what you did and why. \
+             {STYLE}"
         );
         let (args, assigned) = self.session.start();
         let result = self.invoke(args, &prompt, Some(&TASK_SCHEMA), cwd, cancellation);
@@ -276,7 +303,7 @@ impl Agent {
         cancellation: &Cancellation,
     ) -> Result<String, Error> {
         let scratch = tempfile::Builder::new()
-            .prefix("ncli-")
+            .prefix(WORKDIR)
             .tempdir()
             .map_err(Error::WorkingDirectory)?;
         if let Some(schema) = schema {
