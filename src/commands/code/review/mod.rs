@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 pub use change::{Base, Change, Head, RemoteBranch, Worktree};
 pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
-use super::parse_link;
 use crate::agent::{Agent, AgentKind, WORKDIR};
+use crate::commands::parse_link;
 use crate::commands::{Context, Output};
 use crate::error::Error;
 use crate::process::{self, Cancellation};

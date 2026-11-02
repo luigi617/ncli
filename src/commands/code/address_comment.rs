@@ -1,9 +1,9 @@
 use clap::Args;
 
-use super::parse_link;
 use crate::agent::AgentKind;
 use crate::commands::Context;
 use crate::commands::Guidance;
+use crate::commands::parse_link;
 use crate::error::Error;
 use crate::state;
 

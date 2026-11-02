@@ -34,16 +34,3 @@ impl CodeCommand {
         }
     }
 }
-
-fn parse_link(link: &str) -> Result<String, String> {
-    let host = ["https://", "http://"]
-        .iter()
-        .find_map(|scheme| link.strip_prefix(scheme))
-        .and_then(|rest| rest.split(['/', '?', '#']).next());
-    match host {
-        Some(host) if !host.is_empty() && !link.contains(char::is_whitespace) => {
-            Ok(link.to_owned())
-        }
-        _ => Err("expected an http(s) URL".to_owned()),
-    }
-}

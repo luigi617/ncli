@@ -1,5 +1,6 @@
 pub mod code;
 mod copy;
+pub mod doc;
 pub mod standup;
 mod task;
 
@@ -61,6 +62,8 @@ pub enum Command {
     Code(code::CodeCommand),
     /// Copy the output of the last ncli command to the clipboard.
     Copy,
+    #[command(subcommand)]
+    Doc(doc::DocCommand),
     Standup(standup::Standup),
     #[command(external_subcommand)]
     Task(Vec<String>),
@@ -69,7 +72,7 @@ pub enum Command {
 impl Command {
     pub fn records_output(&self) -> bool {
         match self {
-            Self::Code(_) | Self::Standup(_) | Self::Task(_) => true,
+            Self::Code(_) | Self::Doc(_) | Self::Standup(_) | Self::Task(_) => true,
             Self::Copy => false,
         }
     }
@@ -78,8 +81,22 @@ impl Command {
         match self {
             Self::Code(command) => command.run(context).map(Some),
             Self::Copy => copy::run(context).map(|()| None),
+            Self::Doc(command) => command.run(context).map(|text| Some(text.into())),
             Self::Standup(standup) => standup.run(context).map(|text| Some(text.into())),
             Self::Task(words) => task::run(words, context).map(|text| Some(text.into())),
         }
+    }
+}
+
+pub(crate) fn parse_link(link: &str) -> Result<String, String> {
+    let host = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| link.strip_prefix(scheme))
+        .and_then(|rest| rest.split(['/', '?', '#']).next());
+    match host {
+        Some(host) if !host.is_empty() && !link.contains(char::is_whitespace) => {
+            Ok(link.to_owned())
+        }
+        _ => Err("expected an http(s) URL".to_owned()),
     }
 }
