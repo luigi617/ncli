@@ -1,11 +1,11 @@
-mod address_comment;
+mod fix;
 mod implement;
 mod publish_comment;
 pub mod review;
 
 use clap::Subcommand;
 
-pub use address_comment::AddressComment;
+pub use fix::Fix;
 pub use implement::Implement;
 pub use publish_comment::PublishComment;
 
@@ -17,7 +17,7 @@ use crate::error::Error;
 pub enum CodeCommand {
     Review(review::Review),
     PublishComment(PublishComment),
-    AddressComment(AddressComment),
+    Fix(Fix),
     Implement(Implement),
 }
 
@@ -29,7 +29,7 @@ impl CodeCommand {
                 text,
                 records: Vec::new(),
             }),
-            Self::AddressComment(address) => address.run(context).map(Output::from),
+            Self::Fix(fix) => fix.run(context).map(Output::from),
             Self::Implement(implement) => implement.run(context),
         }
     }

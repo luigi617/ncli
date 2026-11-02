@@ -384,7 +384,7 @@ esac
         env.run(&["cpy"]);
         assert_eq!(saved().unwrap(), error);
 
-        env.succeed(&["code", "address-comment"]);
+        env.succeed(&["code", "fix"]);
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(
             prompt.contains(&format!("<output>\n{succeeded}</output>")),
@@ -474,7 +474,7 @@ esac
     }
 
     #[test]
-    fn address_comment_after_publishing_addresses_the_review_not_the_publish_report() {
+    fn fix_after_publishing_addresses_the_review_not_the_publish_report() {
         let env = Env::new(&["claude", "codex"]);
         let review = env.succeed(&["code", "review", LINK]);
         let publish = env.run(&["code", "publish-comment"]);
@@ -486,7 +486,7 @@ esac
             "{}",
             stderr(&publish)
         );
-        env.succeed(&["code", "address-comment"]);
+        env.succeed(&["code", "fix"]);
         let prompt = env.logged("claude.prompt").unwrap();
         assert!(
             prompt.contains(&format!("<output>\n{review}</output>")),
@@ -547,10 +547,10 @@ esac
     }
 
     #[test]
-    fn address_comment_changes_the_current_directory_without_committing() {
+    fn fix_changes_the_current_directory_without_committing() {
         let env = Env::new(&["claude", "codex"]);
         let link = format!("{LINK}#discussion_r1");
-        let output = env.succeed(&["code", "address-comment", &link]);
+        let output = env.succeed(&["code", "fix", &link]);
         let args = env.logged("claude.args").unwrap();
         assert_eq!(
             output,
@@ -572,19 +572,19 @@ esac
     }
 
     #[test]
-    fn address_comment_without_a_link_addresses_the_last_output() {
+    fn fix_without_a_link_addresses_the_last_output() {
         let env = Env::new(&["claude", "codex"]);
-        let output = env.run(&["code", "address-comment"]);
+        let output = env.run(&["code", "fix"]);
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert_eq!(
             stderr(&output).trim(),
-            "ncli code address-comment: error: there is no last output"
+            "ncli code fix: error: there is no last output"
         );
         assert!(env.logged("claude.prompt").is_none());
 
         let review = env.succeed(&["code", "review", LINK]);
         assert!(
-            env.succeed(&["code", "address-comment", "--context", "skip README.md"])
+            env.succeed(&["code", "fix", "--context", "skip README.md"])
                 .starts_with("claude did it\n\nResume: claude --resume ")
         );
         let prompt = env.logged("claude.prompt").unwrap();
@@ -593,14 +593,13 @@ esac
         assert!(prompt.contains("Do not commit, do not push"));
 
         let unrelated = env
-            .ncli(&["code", "address-comment"])
+            .ncli(&["code", "fix"])
             .env("FAKE_COMPLETED", "false")
             .output()
             .unwrap();
         assert_eq!(unrelated.status.code(), Some(Error::FAILURE.into()));
         assert!(
-            stderr(&unrelated)
-                .contains("ncli code address-comment: error: claude could not finish the task: "),
+            stderr(&unrelated).contains("ncli code fix: error: claude could not finish the task: "),
             "{}",
             stderr(&unrelated)
         );

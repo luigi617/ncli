@@ -9,7 +9,7 @@ use crate::state;
 
 /// Change the code in the current directory to address the review comments that hold up.
 #[derive(Debug, Args)]
-pub struct AddressComment {
+pub struct Fix {
     /// URL of the pull request, or of one of its comments [default: the last output]
     #[arg(value_parser = parse_link)]
     pub link: Option<String>,
@@ -17,7 +17,7 @@ pub struct AddressComment {
     pub guidance: Guidance,
 }
 
-impl AddressComment {
+impl Fix {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
         let feedback = match &self.link {
             Some(link) => linked(link),
