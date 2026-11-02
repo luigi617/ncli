@@ -27,7 +27,7 @@ impl Fix {
                 (review.doc, feedback)
             }
         };
-        let agent = AgentKind::first_available()?;
+        let agent = doc.editor(AgentKind::first_available()?);
         Ok(agent
             .perform(
                 &self.guidance.apply(task(&doc, &feedback)),

@@ -13,6 +13,7 @@ pub use review::Review;
 pub use write::Write;
 
 use super::{Context, Output, parse_link};
+use crate::agent::Agent;
 use crate::error::Error;
 
 /// Work with documents.
@@ -56,6 +57,13 @@ fn parse_doc(doc: &str) -> Result<Doc, String> {
 }
 
 impl Doc {
+    fn editor(&self, agent: Agent) -> Agent {
+        match self {
+            Self::Path(path) => agent.writable(path.parent().expect("a file is in a directory")),
+            Self::Link(_) | Self::Text(_) => agent,
+        }
+    }
+
     fn attached(&self) -> String {
         match self {
             Self::Text(text) => format!(

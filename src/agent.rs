@@ -222,6 +222,14 @@ pub struct Agent {
 }
 
 impl Agent {
+    // Codex writes only inside its working directory unless given more; Claude takes the same flag.
+    pub fn writable(self, dir: &Path) -> Self {
+        Self {
+            cli: self.cli.arg("--add-dir").arg(dir),
+            ..self
+        }
+    }
+
     pub fn ask(
         &self,
         prompt: &str,

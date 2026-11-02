@@ -40,6 +40,7 @@ impl Write {
         let mut doc = document
             .doc()
             .ok_or_else(|| nothing_written(&agent).resumable(&written.resume))?;
+        let agent = doc.editor(agent);
         let mut steps = vec![written];
         let mut round = 1;
         loop {

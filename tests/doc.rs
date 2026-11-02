@@ -11,11 +11,13 @@ use tempfile::TempDir;
 
 const FAKE_CLAUDE: &str = r##"#!/bin/sh
 prompt=$(cat)
+args="$*"
 log="$NCLI_TEST_LOG"
 next() {
     count=$(( $(cat "$log/$1.count" 2>/dev/null || echo 0) + 1 ))
     echo "$count" > "$log/$1.count"
     printf '%s' "$prompt" > "$log/$1.$count"
+    printf '%s' "$args" > "$log/$1.$count.args"
 }
 case "$prompt" in
 "Review the document"*)
@@ -254,6 +256,23 @@ fn fix_edits_a_linked_document_in_place() {
     let prompt = env.logged("fix.1").unwrap();
     assert!(prompt.contains("Edit the document at https://example.com/doc/1 in place"));
     assert!(!prompt.contains("<document>"), "{prompt}");
+    assert!(!env.logged("fix.1.args").unwrap().contains("--add-dir"));
+}
+
+#[test]
+fn fix_may_write_where_a_document_outside_the_current_directory_is() {
+    let env = Env::new();
+    let notes = TempDir::new().unwrap();
+    let path = notes.path().join("a.md");
+    fs::write(&path, "# Notes\n").unwrap();
+    env.succeed(&["review", path.to_str().unwrap()], &[]);
+    env.succeed(&["fix"], &[]);
+    let dir = notes.path().canonicalize().unwrap();
+    let args = env.logged("fix.1.args").unwrap();
+    assert!(
+        args.contains(&format!("--add-dir {}", dir.display())),
+        "{args}"
+    );
 }
 
 #[test]
@@ -365,6 +384,12 @@ fn write_to_a_path_ends_when_the_fix_leaves_the_file_unchanged() {
     let (stdout, _) = env.succeed(&["write", "a launch note in note.md"], &vars);
     assert!(stdout.contains("## ncli doc write: 1 problem"), "{stdout}");
     assert_eq!((env.count("review"), env.count("fix")), (1, 1));
+    let dir = path.parent().unwrap();
+    let args = env.logged("fix.1.args").unwrap();
+    assert!(
+        args.contains(&format!("--add-dir {}", dir.display())),
+        "{args}"
+    );
 }
 
 #[test]

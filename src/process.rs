@@ -271,6 +271,11 @@ impl Cli {
         }
     }
 
+    pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
+        self.argv.push(arg.into());
+        self
+    }
+
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.envs.push((key.into(), value.into()));
         self
