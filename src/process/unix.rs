@@ -27,7 +27,7 @@ impl Process {
             }
         };
         let (stdin, output): (Make, Make) = match stdio {
-            Stdio::Piped { piped_stdin } => (input(piped_stdin), StdStdio::piped),
+            Stdio::Piped { piped_stdin, .. } => (input(piped_stdin), StdStdio::piped),
             Stdio::Detached { piped_stdin } => (input(piped_stdin), StdStdio::null),
             Stdio::Terminal => (StdStdio::inherit, StdStdio::inherit),
         };
@@ -65,8 +65,9 @@ impl Process {
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
         let group = &*self.group;
-        let mut pipes =
-            Pipes::new(&mut self.child, input.unwrap_or_default()).inspect_err(|_| group.kill())?;
+        let echo = matches!(self.stdio, Stdio::Piped { echo: true, .. });
+        let mut pipes = Pipes::new(&mut self.child, input.unwrap_or_default(), echo)
+            .inspect_err(|_| group.kill())?;
         let (exit_reader, exit_writer) = io::pipe().inspect_err(|_| group.kill())?;
         let (child, kill_on_exit) = (&self.child, matches!(self.stdio, Stdio::Piped { .. }));
         thread::scope(|scope| {
@@ -145,16 +146,18 @@ fn wait_for_exit(child: &Child) -> io::Result<()> {
 struct Output<P> {
     pipe: Option<P>,
     output: Vec<u8>,
+    echo: bool,
 }
 
 impl<P: Read + AsRawFd> Output<P> {
-    fn new(pipe: Option<P>) -> io::Result<Self> {
+    fn new(pipe: Option<P>, echo: bool) -> io::Result<Self> {
         if let Some(pipe) = &pipe {
             set_nonblocking(pipe)?;
         }
         Ok(Self {
             pipe,
             output: Vec::new(),
+            echo,
         })
     }
 
@@ -166,7 +169,12 @@ impl<P: Read + AsRawFd> Output<P> {
         let mut chunk = [0; 1 << 16];
         match pipe.read(&mut chunk) {
             Ok(0) => self.pipe = None,
-            Ok(read) => self.output.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                if self.echo {
+                    super::echo(&chunk[..read]);
+                }
+                self.output.extend_from_slice(&chunk[..read]);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -186,7 +194,7 @@ struct Pipes<'a> {
 }
 
 impl<'a> Pipes<'a> {
-    fn new(child: &mut Child, input: &'a [u8]) -> io::Result<Self> {
+    fn new(child: &mut Child, input: &'a [u8], echo: bool) -> io::Result<Self> {
         let stdin = child.stdin.take().filter(|_| !input.is_empty());
         if let Some(stdin) = &stdin {
             set_nonblocking(stdin)?;
@@ -194,8 +202,8 @@ impl<'a> Pipes<'a> {
         Ok(Self {
             stdin,
             input,
-            stdout: Output::new(child.stdout.take())?,
-            stderr: Output::new(child.stderr.take())?,
+            stdout: Output::new(child.stdout.take(), echo)?,
+            stderr: Output::new(child.stderr.take(), echo)?,
         })
     }
 

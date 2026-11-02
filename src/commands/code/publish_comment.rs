@@ -17,10 +17,10 @@ impl PublishComment {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
         let LastReview { change, verdict } = LastReview::load()?;
         if verdict.findings.is_empty() {
-            return Err(Error::NothingToPublish(change));
+            return Err(Error::NothingToPublish(Box::new(change)));
         }
         let Change::Link(link) = change else {
-            return Err(Error::Unpublishable(change));
+            return Err(Error::Unpublishable(Box::new(change)));
         };
         let agent = AgentKind::first_available()?;
         context.progress(&format!("publishing {} to {link}", verdict.count()));

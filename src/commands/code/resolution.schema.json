@@ -1,0 +1,3 @@
+{
+  "kept": { "type": "array", "items": { "type": "string" } }
+}

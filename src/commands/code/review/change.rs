@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -7,11 +6,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::commands::code::git::{Git, Head, RemoteBranch};
 use crate::error::Error;
-use crate::process::{self, Cancellation, Cli, ProcessError};
-
-const PREFERRED_REMOTE: &str = "origin";
-const REMOTES: &str = "refs/remotes/";
+use crate::process::{Cancellation, Cli, ProcessError};
 // Keeps the user's diff settings and drivers from hiding parts of the change.
 const DIFF: [&str; 4] = [
     "diff",
@@ -61,47 +58,7 @@ impl fmt::Display for Base {
     }
 }
 
-// Kept as the full ref, since a local branch can share a remote branch's short name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RemoteBranch(String);
-
-impl fmt::Display for RemoteBranch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.strip_prefix(REMOTES).unwrap_or(&self.0))
-    }
-}
-
-struct Git<'a> {
-    cli: Cli,
-    cwd: &'a Path,
-    cancellation: &'a Cancellation,
-}
-
 impl Git<'_> {
-    fn run(&self, args: &[&str]) -> Result<String, ProcessError> {
-        self.run_with_input(args, None)
-    }
-
-    fn run_with_input(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, ProcessError> {
-        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-        let output = self
-            .cli
-            .run(&args, input, Some(self.cwd), self.cancellation)?;
-        Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
-    }
-
-    fn head(&self) -> Result<Head, ProcessError> {
-        let optional = |args: &[&str]| match self.run(args) {
-            Err(ProcessError::Exit { code: 1, .. }) => Ok(None),
-            found => found.map(Some),
-        };
-        Ok(Head {
-            branch: optional(&["symbolic-ref", "--quiet", "HEAD"])?,
-            commit: optional(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?,
-        })
-    }
-
     fn empty_tree(&self) -> Result<String, ProcessError> {
         self.run_with_input(&["hash-object", "-t", "tree", "--stdin"], Some(b""))
     }
@@ -248,32 +205,6 @@ impl Git<'_> {
         }
         Ok(dirty)
     }
-
-    fn default_branch(&self) -> Result<RemoteBranch, Error> {
-        let output = self.run(&["for-each-ref", "--format=%(refname) %(symref)", REMOTES])?;
-        let mut heads: Vec<(&str, RemoteBranch)> = output
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .filter(|(name, target)| name.ends_with("/HEAD") && !target.is_empty())
-            .map(|(name, target)| (name, RemoteBranch(target.to_owned())))
-            .collect();
-        let preferred = format!("{REMOTES}{PREFERRED_REMOTE}/HEAD");
-        match heads.len() {
-            0 => Err(Error::NoDefaultBranch),
-            1 => Ok(heads.remove(0).1),
-            _ => match heads.iter().position(|(name, _)| *name == preferred) {
-                Some(index) => Ok(heads.swap_remove(index).1),
-                None => Err(Error::AmbiguousDefaultBranch {
-                    branches: heads
-                        .iter()
-                        .map(|(_, branch)| branch.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    preferred: PREFERRED_REMOTE,
-                }),
-            },
-        }
-    }
 }
 
 struct Index(HashSet<(String, String)>);
@@ -300,27 +231,6 @@ fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
         .set_modified(modified)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Head {
-    branch: Option<String>,
-    commit: Option<String>,
-}
-
-impl fmt::Display for Head {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let branch = self
-            .branch
-            .as_deref()
-            .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch));
-        match (branch, &self.commit) {
-            (Some(branch), Some(commit)) => write!(f, "{branch} at {commit}"),
-            (Some(branch), None) => write!(f, "{branch} with no commits"),
-            (None, Some(commit)) => write!(f, "a detached HEAD at {commit}"),
-            (None, None) => f.write_str("no commit"),
-        }
-    }
-}
-
 pub struct Worktree {
     pub repo: PathBuf,
     pub head: Head,
@@ -339,6 +249,10 @@ impl Worktree {
         Self::take(Some(self), cancellation)
     }
 
+    pub(in crate::commands::code) fn uncommitted(&self, git: &Git) -> Result<bool, Error> {
+        Ok(self.tree != git.run(&["rev-parse", &format!("{}^{{tree}}", self.base.id())])?)
+    }
+
     pub fn change(&self) -> Change {
         Change::Uncommitted {
             repo: self.repo.clone(),
@@ -348,17 +262,8 @@ impl Worktree {
     }
 
     fn take(earlier: Option<&Self>, cancellation: &Cancellation) -> Result<Self, Error> {
-        let git = Git {
-            cli: Cli::new(["git"]),
-            cwd: Path::new("."),
-            cancellation,
-        };
-        process::require_executables([git.cli.executable()])?;
-        let repo = match git.run(&["rev-parse", "--show-toplevel"]) {
-            Err(error @ ProcessError::Exit { .. }) => return Err(Error::NotAWorkTree(error)),
-            repo => PathBuf::from(repo?),
-        };
-        let git = Git { cwd: &repo, ..git };
+        let repo = Git::toplevel(cancellation)?;
+        let git = Git::new(&repo, cancellation);
         let head = git.head()?;
         let committed = match &head.commit {
             Some(head) => head.clone(),
@@ -390,50 +295,49 @@ impl Worktree {
 
 impl Change {
     pub fn local(cancellation: &Cancellation) -> Result<Self, Error> {
-        let Worktree {
-            repo,
-            head,
-            base,
-            tree,
-            ..
-        } = Worktree::snapshot(cancellation).map_err(|error| match error {
+        let worktree = Worktree::snapshot(cancellation).map_err(|error| match error {
             Error::NotAWorkTree(source) => Error::NoLocalChange(source),
             error => error,
         })?;
-        let git = Git {
-            cli: Cli::new(["git"]),
-            cwd: &repo,
-            cancellation,
-        };
-        if tree != git.run(&["rev-parse", &format!("{}^{{tree}}", base.id())])? {
-            return Ok(Self::Uncommitted {
-                repo,
-                base,
-                snapshot: tree,
-            });
+        let git = Git::new(&worktree.repo, cancellation);
+        if worktree.uncommitted(&git)? {
+            return Ok(worktree.change());
         }
-        let Some(head) = head.commit else {
-            return Err(Error::NoCommits(repo));
+        let Some(head) = &worktree.head.commit else {
+            return Err(Error::NoCommits(worktree.repo));
         };
-        let base = git.default_branch()?;
-        let merge_base = match git.run(&["merge-base", &base.0, &head]) {
-            Err(ProcessError::Exit { code: 1, .. }) => {
-                return Err(Error::NoCommonHistory { repo, base });
-            }
-            merge_base => merge_base?,
-        };
-        if merge_base == head {
-            return Err(Error::NoChanges { repo, base });
-        }
-        Ok(Self::Branch {
-            repo,
+        let base = git.remote_branch(None)?;
+        Self::ahead(&git, &worktree.repo, head, &base)?.ok_or_else(|| Error::NoChanges {
+            repo: worktree.repo.clone(),
             base,
-            merge_base,
-            head,
         })
     }
 
-    pub(super) fn access(&self) -> String {
+    // The commits up to head that are not on base, if there are any.
+    pub(in crate::commands::code) fn ahead(
+        git: &Git,
+        repo: &Path,
+        head: &str,
+        base: &RemoteBranch,
+    ) -> Result<Option<Self>, Error> {
+        let merge_base = match git.run(&["merge-base", &base.refname(), head]) {
+            Err(ProcessError::Exit { code: 1, .. }) => {
+                return Err(Error::NoCommonHistory {
+                    repo: repo.to_owned(),
+                    base: base.clone(),
+                });
+            }
+            merge_base => merge_base?,
+        };
+        Ok((merge_base != head).then(|| Self::Branch {
+            repo: repo.to_owned(),
+            base: base.clone(),
+            merge_base,
+            head: head.to_owned(),
+        }))
+    }
+
+    pub(in crate::commands::code) fn access(&self) -> String {
         let diff = DIFF.join(" ");
         match self {
             Self::Link(_) => "Fetch it yourself, using your own tools and skills.".to_owned(),

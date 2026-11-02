@@ -1,7 +1,7 @@
 use clap::Args;
 
-use super::fix;
 use super::review::{Change, LastReview, Panel, Report, Verdict, Worktree, debate};
+use super::{changed, fix, resumable};
 use crate::agent::{Agent, AgentKind, Performed};
 use crate::commands::{Context, Output, task};
 use crate::error::Error;
@@ -69,35 +69,18 @@ fn settled(
     steps: &[Performed],
     cancellation: &Cancellation,
 ) -> Result<Worktree, Error> {
-    let worktree = baseline
-        .since(cancellation)
-        .map_err(|error| resumable(error, steps))?;
-    let error = if worktree.head != baseline.head {
-        Error::HeadMoved {
-            repo: worktree.repo,
-            from: Box::new(baseline.head.clone()),
-            to: Box::new(worktree.head),
-        }
-    } else if worktree.tree == baseline.tree {
-        Error::NothingImplemented {
+    changed(baseline, steps, cancellation)?.ok_or_else(|| {
+        let error = Error::NothingImplemented {
             agent: agent.name.clone(),
-            repo: worktree.repo,
-            report: last(steps).report.clone(),
-        }
-    } else {
-        return Ok(worktree);
-    };
-    Err(resumable(error, steps))
-}
-
-fn last(steps: &[Performed]) -> &Performed {
-    steps
-        .last()
-        .expect("the implement step is always performed")
-}
-
-fn resumable(error: Error, steps: &[Performed]) -> Error {
-    error.resumable(&last(steps).resume)
+            repo: baseline.repo.clone(),
+            report: steps
+                .last()
+                .expect("the implement step is always performed")
+                .report
+                .clone(),
+        };
+        resumable(error, steps)
+    })
 }
 
 fn summary(context: &Context, steps: &[Performed], verdict: &Verdict) -> String {

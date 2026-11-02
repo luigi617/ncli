@@ -1,7 +1,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::review::{Change, Head, RemoteBranch};
+use crate::commands::code::review::Change;
+use crate::commands::code::{Head, Operation, RemoteBranch, Unshippable};
 use crate::commands::session::SessionName;
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
@@ -27,7 +28,7 @@ pub enum Error {
     #[error("{source}\nResume: {resume}")]
     Resumable { source: Box<Error>, resume: String },
     #[error("the judge could not access {0}")]
-    ChangeUnavailable(Change),
+    ChangeUnavailable(Box<Change>),
     #[error(
         "the repository has no default branch to compare the current branch with; set one with `git remote set-head <remote> --auto`"
     )]
@@ -37,6 +38,18 @@ pub enum Error {
     )]
     AmbiguousDefaultBranch {
         branches: String,
+        preferred: &'static str,
+    },
+    #[error(
+        "no remote has a branch named {0}; check the name, or fetch it with `git fetch <remote>`"
+    )]
+    NoRemoteBranch(String),
+    #[error(
+        "several remotes have a branch named {branch} ({remotes}) and none of them is {preferred}"
+    )]
+    AmbiguousRemoteBranch {
+        branch: String,
+        remotes: String,
         preferred: &'static str,
     },
     #[error("there is nothing to review in {}: no commits and no uncommitted changes", .0.display())]
@@ -80,7 +93,7 @@ pub enum Error {
         report: String,
     },
     #[error(
-        "HEAD in {} moved from {from} to {to} during the run; agents must not commit or switch branches, so the changes were not reviewed",
+        "HEAD in {} moved from {from} to {to} during the run; agents must not commit or switch branches",
         .repo.display()
     )]
     HeadMoved {
@@ -96,6 +109,95 @@ pub enum Error {
         rounds: u32,
         report: String,
     },
+    #[error("gh is not logged in; run `gh auth login`: {0}")]
+    GhUnauthenticated(#[source] ProcessError),
+    #[error(
+        "there is nothing to ship in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
+    )]
+    NothingToShip { repo: PathBuf, base: RemoteBranch },
+    #[error("{agent} wrote an unusable pull request: {problem}")]
+    InvalidShipment {
+        agent: String,
+        #[source]
+        problem: Unshippable,
+    },
+    #[error(
+        "{agent} changed the files in {} while writing the pull request; nothing was committed or pushed", .repo.display()
+    )]
+    ChangedWhileShipping { agent: String, repo: PathBuf },
+    #[error("{0} does not name a GitHub repository")]
+    NotAGitHubRemote(String),
+    #[error(
+        "{remote} fetches from {fetch} but pushes to {push}; ship needs both to be the repository the pull request is opened in"
+    )]
+    PushesElsewhere {
+        remote: String,
+        fetch: String,
+        push: String,
+    },
+    #[error("gh listed pull requests in an unexpected format: {0}")]
+    GhOutput(#[source] serde_json::Error),
+    #[error("gh created the pull request but printed no URL")]
+    NoPullRequestUrl,
+    #[error("{agent} left no changes in {} to fix the check: {}", .repo.display(), .report.trim())]
+    NothingFixed {
+        agent: String,
+        repo: PathBuf,
+        report: String,
+    },
+    #[error(
+        "HEAD in {} moved from {from} to {to} while `{check}` ran; the check must not commit or switch branches",
+        .repo.display()
+    )]
+    CheckMovedHead {
+        check: String,
+        repo: PathBuf,
+        from: Box<Head>,
+        to: Box<Head>,
+    },
+    #[error("`{check}` still fails after {rounds} round(s) of fixes:\n\n{report}")]
+    StillFailing {
+        check: String,
+        rounds: u32,
+        report: String,
+    },
+    #[error("a {operation} is already in progress in {}; finish or abort it first", .repo.display())]
+    OperationInProgress { repo: PathBuf, operation: Operation },
+    #[error(
+        "the working tree in {} has unresolved conflicts in {paths}; resolve and stage them first", .repo.display()
+    )]
+    UnmergedPaths { repo: PathBuf, paths: String },
+    #[error("cannot sync {head} in {}; switch to a branch with commits first", .repo.display())]
+    NotOnABranch { repo: PathBuf, head: Box<Head> },
+    #[error(
+        "the working tree in {} has uncommitted changes ({paths}); commit or stash them first", .repo.display()
+    )]
+    DirtyWorktree { repo: PathBuf, paths: String },
+    #[error(
+        "the conflicts in {paths} were left unresolved while applying {commit}, so the rebase was aborted: {}", .report.trim()
+    )]
+    UnresolvedConflicts {
+        commit: String,
+        paths: String,
+        report: String,
+    },
+    #[error(
+        "{paths} changed outside the conflicts while applying {commit}, so the rebase was aborted; only the conflicted files may be edited: {}", .report.trim()
+    )]
+    EditedOutsideConflicts {
+        commit: String,
+        paths: String,
+        report: String,
+    },
+    #[error(
+        "{error}\n`git rebase --abort` then failed, so the rebase is still in progress: {abort}"
+    )]
+    RebaseNotAborted {
+        error: Box<Error>,
+        abort: Box<ProcessError>,
+    },
+    #[error("could not read the conflicted file {}: {source}", .path.display())]
+    ReadConflicted { path: PathBuf, source: io::Error },
     #[error("{0} wrote no document")]
     NothingWritten(String),
     #[error("could not read the document at {}: {source}", .path.display())]
@@ -119,9 +221,9 @@ pub enum Error {
     #[error("there is no review to publish; run `ncli code review` first")]
     NoReview,
     #[error("the last review of {0} has no findings to publish")]
-    NothingToPublish(Change),
+    NothingToPublish(Box<Change>),
     #[error("the last review was of {0}, which has nowhere to publish comments")]
-    Unpublishable(Change),
+    Unpublishable(Box<Change>),
     #[error("there is no display to copy to; set WAYLAND_DISPLAY or DISPLAY")]
     NoClipboard,
     #[error("could not find a directory to save state in; set {DIR_VAR}")]
@@ -183,7 +285,9 @@ impl Error {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,
             Self::EmptyTask | Self::NotATask(_) => Self::USAGE,
-            Self::Resumable { source, .. } => source.exit_code(),
+            Self::Resumable { source, .. } | Self::RebaseNotAborted { error: source, .. } => {
+                source.exit_code()
+            }
             Self::WorkingDirectory(_)
             | Self::InvalidAnswer { .. }
             | Self::NoSession(_)
@@ -191,6 +295,8 @@ impl Error {
             | Self::ChangeUnavailable(_)
             | Self::NoDefaultBranch
             | Self::AmbiguousDefaultBranch { .. }
+            | Self::NoRemoteBranch(_)
+            | Self::AmbiguousRemoteBranch { .. }
             | Self::NoCommits(_)
             | Self::NotAWorkTree(_)
             | Self::NoLocalChange(_)
@@ -203,6 +309,24 @@ impl Error {
             | Self::NothingImplemented { .. }
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
+            | Self::GhUnauthenticated(_)
+            | Self::NothingToShip { .. }
+            | Self::InvalidShipment { .. }
+            | Self::ChangedWhileShipping { .. }
+            | Self::NotAGitHubRemote(_)
+            | Self::PushesElsewhere { .. }
+            | Self::GhOutput(_)
+            | Self::NoPullRequestUrl
+            | Self::NothingFixed { .. }
+            | Self::StillFailing { .. }
+            | Self::CheckMovedHead { .. }
+            | Self::OperationInProgress { .. }
+            | Self::UnmergedPaths { .. }
+            | Self::NotOnABranch { .. }
+            | Self::DirtyWorktree { .. }
+            | Self::UnresolvedConflicts { .. }
+            | Self::EditedOutsideConflicts { .. }
+            | Self::ReadConflicted { .. }
             | Self::NothingWritten(_)
             | Self::ReadDoc { .. }
             | Self::NoDocReview

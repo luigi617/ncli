@@ -39,6 +39,7 @@ pub struct Process {
     stdin: Option<File>,
     stdout: Option<File>,
     stderr: Option<File>,
+    echo: bool,
 }
 
 impl Process {
@@ -46,8 +47,8 @@ impl Process {
     // is what lets `CancelSynchronousIo` stop a read or write that a process outside the job blocks.
     // A command run in the terminal shares ncli's console and its Ctrl+C.
     pub fn spawn(mut command: Command, stdio: Stdio) -> io::Result<Self> {
-        let (stdin, stdout, stderr) = match stdio {
-            Stdio::Piped { piped_stdin } => {
+        let (stdin, stdout, stderr, echo) = match stdio {
+            Stdio::Piped { piped_stdin, echo } => {
                 let (stdout, child_stdout) = pipe()?;
                 let (stderr, child_stderr) = pipe()?;
                 let stdin = if piped_stdin {
@@ -62,7 +63,12 @@ impl Process {
                     .stdout(StdStdio::from(child_stdout))
                     .stderr(StdStdio::from(child_stderr))
                     .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
-                (stdin, Some(File::from(stdout)), Some(File::from(stderr)))
+                (
+                    stdin,
+                    Some(File::from(stdout)),
+                    Some(File::from(stderr)),
+                    echo,
+                )
             }
             Stdio::Terminal => {
                 command
@@ -70,7 +76,7 @@ impl Process {
                     .stdout(StdStdio::inherit())
                     .stderr(StdStdio::inherit())
                     .creation_flags(CREATE_SUSPENDED);
-                (None, None, None)
+                (None, None, None, false)
             }
         };
         let mut child = command.spawn()?;
@@ -82,6 +88,7 @@ impl Process {
             stdin,
             stdout,
             stderr,
+            echo,
         })
     }
 
@@ -94,8 +101,9 @@ impl Process {
         input: Option<&[u8]>,
         timeout: Option<Duration>,
     ) -> io::Result<Communicated> {
+        let echo = self.echo;
         let reader = |pipe: Option<File>| {
-            pipe.map(|mut pipe| Worker::spawn(move |stop| read(&mut pipe, stop)))
+            pipe.map(|mut pipe| Worker::spawn(move |stop| read(&mut pipe, stop, echo)))
         };
         let (stdout, stderr) = (reader(self.stdout.take()), reader(self.stderr.take()));
         let stdin = self.stdin.take().zip(input).map(|(mut stdin, input)| {
@@ -177,13 +185,18 @@ impl<T: Send + 'static> Worker<T> {
     }
 }
 
-fn read(pipe: &mut File, stop: &AtomicBool) -> io::Result<Vec<u8>> {
+fn read(pipe: &mut File, stop: &AtomicBool, echo: bool) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut chunk = [0; 8192];
     while !stop.load(Ordering::SeqCst) {
         match pipe.read(&mut chunk) {
             Ok(0) => break,
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                if echo {
+                    super::echo(&chunk[..read]);
+                }
+                output.extend_from_slice(&chunk[..read]);
+            }
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
             Err(_) if stop.load(Ordering::SeqCst) => break,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}

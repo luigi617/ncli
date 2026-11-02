@@ -231,6 +231,11 @@ fn failure(call: &Call, outcome: Outcome) -> ProcessError {
     }
 }
 
+// Best effort, like ncli's own diagnostics: a closed stderr must not fail the command.
+fn echo(output: &[u8]) {
+    let _ = io::Write::write_all(&mut io::stderr().lock(), output);
+}
+
 fn universal_newlines(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
         .replace("\r\n", "\n")
@@ -241,6 +246,7 @@ fn universal_newlines(bytes: &[u8]) -> String {
 enum Stdio {
     Piped {
         piped_stdin: bool,
+        echo: bool,
     },
     #[cfg(unix)]
     Detached {
@@ -264,6 +270,7 @@ pub struct Cli {
     retry_delay: Duration,
     tracer: Box<dyn Tracer>,
     terminal: bool,
+    echo: bool,
     #[cfg(unix)]
     leave_running: bool,
 }
@@ -280,6 +287,7 @@ impl Cli {
             retry_delay: Duration::ZERO,
             tracer: Box::new(SilentTracer),
             terminal: false,
+            echo: false,
             #[cfg(unix)]
             leave_running: false,
         }
@@ -330,6 +338,12 @@ impl Cli {
         }
     }
 
+    // For a command whose output the user follows as it runs, such as a test suite. Its output is
+    // still captured, and is also copied to ncli's stderr, which keeps ncli's stdout for its result.
+    pub fn echo(self) -> Self {
+        Self { echo: true, ..self }
+    }
+
     // For a command that must leave a process running, such as a clipboard owner. That process would
     // hold the output pipes open, so the output is discarded.
     #[cfg(unix)]
@@ -348,7 +362,10 @@ impl Cli {
         if self.leave_running {
             return Stdio::Detached { piped_stdin };
         }
-        Stdio::Piped { piped_stdin }
+        Stdio::Piped {
+            piped_stdin,
+            echo: self.echo,
+        }
     }
 
     pub fn executable(&self) -> &OsStr {

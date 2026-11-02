@@ -9,7 +9,7 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-pub use change::{Base, Change, Head, RemoteBranch, Worktree};
+pub use change::{Base, Change, Worktree};
 pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
 use crate::agent::{Agent, AgentKind, WORKDIR};
@@ -148,7 +148,7 @@ pub fn debate(
         output: verdict,
     })?;
     if !verdict.change_accessed {
-        return Err(Error::ChangeUnavailable(change.clone()));
+        return Err(Error::ChangeUnavailable(Box::new(change.clone())));
     }
     Ok(verdict)
 }
