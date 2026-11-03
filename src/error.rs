@@ -100,10 +100,12 @@ pub enum Error {
         from: String,
         tip: String,
         source: Box<Error>,
-        restore: Box<ProcessError>,
+        restore: Box<Error>,
     },
     #[error("could not read the rebase state: {0}")]
     RebaseState(#[source] io::Error),
+    #[error("could not remove {}, which the agent created: {source}", .path.display())]
+    RemoveCreated { path: PathBuf, source: io::Error },
     #[error(transparent)]
     Unresolved(#[from] Unresolved),
     #[error("{agent} changed the work in {} while describing it, so it was not shipped", .repo.display())]
@@ -256,6 +258,7 @@ impl Error {
             | Self::UncommittedChanges { .. }
             | Self::Unresolved(_)
             | Self::RebaseState(_)
+            | Self::RemoveCreated { .. }
             | Self::ChangedWhileDescribing { .. }
             | Self::UnusableAnswer { .. }
             | Self::OtherUpstream { .. }

@@ -588,6 +588,70 @@ esac
             assert_eq!(env.git(&["ls-files", "-v", "other.md"]), "H other.md");
         }
 
+        const HIJACK: &str = "printf 'HIJACKED\\n' > other.md";
+
+        fn edit_to_hidden_file_is_undone(flag: &str, listed: &str, edit: &str) {
+            let env = Env::new();
+            env.write("other.md", "other\n");
+            env.commit("Other.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.git(&["update-index", flag, "other.md"]);
+            let resolve = format!("printf 'x\\n' > README.md && git add README.md && {edit}");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert!(stderr.contains("conflicted files (other.md)"), "{stderr}");
+            env.assert_put_back(&tip);
+            assert_eq!(env.read("other.md"), "other\n");
+            assert_eq!(env.git(&["ls-files", "-v", "other.md"]), listed);
+        }
+
+        #[test]
+        fn an_agent_that_edits_an_assume_unchanged_file_is_undone() {
+            edit_to_hidden_file_is_undone("--assume-unchanged", "h other.md", HIJACK);
+        }
+
+        #[test]
+        fn an_agent_that_edits_a_skip_worktree_file_is_undone() {
+            edit_to_hidden_file_is_undone("--skip-worktree", "S other.md", HIJACK);
+        }
+
+        #[test]
+        fn an_agent_that_deletes_a_skip_worktree_file_is_undone() {
+            edit_to_hidden_file_is_undone("--skip-worktree", "S other.md", "rm other.md");
+        }
+
+        fn left_out_by_sparse_checkout() -> (Env, String) {
+            let env = Env::new();
+            env.write("other.md", "other\n");
+            env.commit("Other.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.git(&["update-index", "--skip-worktree", "other.md"]);
+            fs::remove_file(env.work.path().join("other.md")).unwrap();
+            (env, tip)
+        }
+
+        #[test]
+        fn a_skip_worktree_file_left_out_of_the_checkout_stays_out() {
+            let (env, _) = left_out_by_sparse_checkout();
+            env.succeed(&["code", "sync"], &[]);
+            assert!(!env.work.path().join("other.md").exists());
+            assert_eq!(env.git(&["ls-files", "-v", "other.md"]), "S other.md");
+        }
+
+        #[test]
+        fn an_agent_that_creates_a_skip_worktree_file_left_out_is_undone() {
+            let (env, tip) = left_out_by_sparse_checkout();
+            let resolve = format!("printf 'x\\n' > README.md && git add README.md && {HIJACK}");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert!(stderr.contains("conflicted files (other.md)"), "{stderr}");
+            env.assert_put_back(&tip);
+            assert!(!env.work.path().join("other.md").exists());
+            assert_eq!(env.git(&["ls-files", "-v", "other.md"]), "S other.md");
+        }
+
         #[test]
         fn an_agent_that_hides_the_resolution_is_undone() {
             fails_and_puts_back(

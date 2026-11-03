@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -236,25 +236,48 @@ impl<'a> Git<'a> {
         Ok((dir, git))
     }
 
-    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
-    // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
-    pub(super) fn refuse_hidden_edits(&self) -> Result<(), Error> {
-        let index = self.index()?;
-        let marked: HashSet<&str> = index
+    // Each hidden path, and whether a sparse checkout leaves it out: a skip-worktree file missing
+    // from disk is not edited, and is edited once it appears.
+    pub(super) fn watched(&self) -> Result<HashMap<String, bool>, ProcessError> {
+        Ok(self
+            .index()?
             .hidden()
             .into_iter()
-            .filter(|&(path, skip)| !skip || self.cwd.join(path).symlink_metadata().is_ok())
+            .map(|(path, skip)| (path.to_owned(), skip && !self.on_disk(path)))
+            .collect())
+    }
+
+    fn on_disk(&self, path: &str) -> bool {
+        self.cwd.join(path).symlink_metadata().is_ok()
+    }
+
+    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
+    // index.
+    pub(super) fn hidden_edits(
+        &self,
+        watched: &HashMap<String, bool>,
+    ) -> Result<Vec<String>, ProcessError> {
+        let (left_out, kept): (Vec<_>, Vec<_>) = watched.iter().partition(|(_, out)| **out);
+        let mut edits: Vec<String> = left_out
+            .into_iter()
             .map(|(path, _)| path)
+            .filter(|path| self.on_disk(path))
+            .cloned()
             .collect();
-        if marked.is_empty() {
-            return Ok(());
+        if !kept.is_empty() {
+            self.unhide(kept.into_iter().map(|(path, _)| path.as_str()))?;
+            edits.extend(
+                self.changed_paths(&[])?
+                    .split_terminator('\0')
+                    .filter(|path| watched.get(*path) == Some(&false))
+                    .map(str::to_owned),
+            );
         }
-        self.unhide(marked.iter().copied())?;
-        let modified = self.changed_paths(&[])?;
-        let hidden: Vec<&str> = modified
-            .split('\0')
-            .filter(|path| marked.contains(path))
-            .collect();
+        Ok(edits)
+    }
+
+    pub(super) fn refuse_hidden_edits(&self) -> Result<(), Error> {
+        let hidden = self.hidden_edits(&self.watched()?)?;
         if hidden.is_empty() {
             return Ok(());
         }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -75,12 +75,7 @@ impl Sync {
             });
         }
         git.index_copy()?.1.refuse_hidden_edits()?;
-        let hidden: HashSet<String> = git
-            .index()?
-            .hidden()
-            .into_iter()
-            .map(|(path, _)| path.to_owned())
-            .collect();
+        let watched = git.watched()?;
         let from = git.upstream(self.from.as_deref())?;
         context.progress(&format!("fetching {from}"));
         let onto = git.fetch(&from)?;
@@ -101,7 +96,7 @@ impl Sync {
             ..git
         };
         let (branch, from, tip) = (branch.to_owned(), from.to_string(), tip.to_owned());
-        Err(match restore(&git, &branch, &tip, &hidden) {
+        Err(match restore(&git, &branch, &tip, &watched) {
             Ok(()) => Error::NotSynced {
                 branch,
                 from,
@@ -171,6 +166,7 @@ fn resolve(
 ) -> Result<(), Error> {
     let before = git.index()?;
     let worktree = git.status()?;
+    let watched = git.watched()?;
     context.progress(&format!(
         "resolving {}",
         count(conflicted.len(), "conflict")
@@ -207,6 +203,7 @@ fn resolve(
             )
             .map(str::to_owned),
     );
+    outside.extend(git.index_copy()?.1.hidden_edits(&watched)?);
     outside.sort();
     outside.dedup();
     if !outside.is_empty() {
@@ -285,15 +282,15 @@ fn restore(
     git: &Git,
     branch: &str,
     tip: &str,
-    hidden: &HashSet<String>,
-) -> Result<(), ProcessError> {
+    watched: &HashMap<String, bool>,
+) -> Result<(), Error> {
     let index = git.index()?;
     git.unhide(
         index
             .hidden()
             .into_iter()
             .map(|(path, _)| path)
-            .filter(|path| !hidden.contains(*path)),
+            .filter(|path| !watched.contains_key(*path)),
     )?;
     // Aborting checks out the old tip, which files the agent left in its way would block.
     git.run(&["reset", "--quiet", "--hard"])?;
@@ -304,6 +301,33 @@ fn restore(
     git.run(&["switch", "--quiet", "--discard-changes", branch])?;
     git.run(&["reset", "--quiet", "--hard", "--recurse-submodules", tip])?;
     git.run(&["clean", "--quiet", "--force", "-d"])?;
+    let (left_out, edited): (Vec<String>, Vec<String>) = git
+        .index_copy()?
+        .1
+        .hidden_edits(watched)?
+        .into_iter()
+        .partition(|path| watched[path]);
+    for path in left_out {
+        let path = git.cwd.join(path);
+        match path.symlink_metadata() {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
+            _ => fs::remove_file(&path),
+        }
+        .map_err(|source| Error::RemoveCreated { path, source })?;
+    }
+    let edited: String = edited.into_iter().map(|path| format!("{path}\0")).collect();
+    if !edited.is_empty() {
+        git.run_with_input(
+            &[
+                "checkout-index",
+                "--force",
+                "--ignore-skip-worktree-bits",
+                "-z",
+                "--stdin",
+            ],
+            Some(edited.as_bytes()),
+        )?;
+    }
     Ok(())
 }
 
