@@ -35,26 +35,37 @@ pub enum Operation {
     Merge,
     CherryPick,
     Revert,
+    Sequence,
 }
 
 impl Operation {
-    const MARKERS: [(&str, Self); 5] = [
+    // A sequence of picks or reverts stays in progress after one of them is committed by hand.
+    const MARKERS: [(&str, Self); 6] = [
         ("rebase-merge", Self::Rebase),
         ("rebase-apply", Self::Rebase),
         ("MERGE_HEAD", Self::Merge),
         ("CHERRY_PICK_HEAD", Self::CherryPick),
         ("REVERT_HEAD", Self::Revert),
+        ("sequencer", Self::Sequence),
     ];
+
+    // The git command that aborts the operation; `cherry-pick --abort` also ends a revert sequence.
+    pub(super) fn command(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase",
+            Self::Merge => "merge",
+            Self::CherryPick | Self::Sequence => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
 }
 
 impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Rebase => "rebase",
-            Self::Merge => "merge",
-            Self::CherryPick => "cherry-pick",
-            Self::Revert => "revert",
-        })
+        match self {
+            Self::Sequence => f.write_str("cherry-pick or revert sequence"),
+            operation => f.write_str(operation.command()),
+        }
     }
 }
 
@@ -130,7 +141,7 @@ impl<'a> Git<'a> {
         })
     }
 
-    fn commit(&self, rev: &str) -> Result<Option<String>, ProcessError> {
+    pub(super) fn commit(&self, rev: &str) -> Result<Option<String>, ProcessError> {
         self.optional(&[
             "rev-parse",
             "--verify",
@@ -157,6 +168,24 @@ impl<'a> Git<'a> {
             .zip(Operation::MARKERS)
             .find(|(path, _)| self.cwd.join(path).exists())
             .map(|(_, (_, operation))| operation))
+    }
+
+    // Rejects a repository in the middle of an operation or with unresolved conflicts.
+    pub(super) fn ensure_idle(&self) -> Result<(), Error> {
+        if let Some(operation) = self.in_progress()? {
+            return Err(Error::OperationInProgress {
+                repo: self.cwd.to_owned(),
+                operation,
+            });
+        }
+        let unmerged = self.unmerged()?;
+        if !unmerged.is_empty() {
+            return Err(Error::UnmergedPaths {
+                repo: self.cwd.to_owned(),
+                paths: unmerged.join(", "),
+            });
+        }
+        Ok(())
     }
 
     pub(super) fn is_ancestor(&self, ancestor: &str, rev: &str) -> Result<bool, ProcessError> {
@@ -249,10 +278,15 @@ impl<'a> Git<'a> {
         }))
     }
 
-    pub(super) fn fetch(&self, branch: &RemoteBranch) -> Result<(), ProcessError> {
+    // The fetched commit, which later fetches cannot move as they can the remote-tracking ref.
+    pub(super) fn fetch(&self, branch: &RemoteBranch) -> Result<String, ProcessError> {
         let refspec = format!("+refs/heads/{}:{}", branch.branch, branch.refname());
         self.run(&["fetch", "--quiet", &branch.remote, &refspec])?;
-        Ok(())
+        self.run(&[
+            "rev-parse",
+            "--verify",
+            &format!("{}^{{commit}}", branch.refname()),
+        ])
     }
 
     fn default_branch(&self) -> Result<RemoteBranch, Error> {

@@ -320,6 +320,9 @@ impl Change {
         head: &str,
         base: &RemoteBranch,
     ) -> Result<Option<Self>, Error> {
+        if git.commit(&base.refname())?.is_none() {
+            return Err(Error::Unfetched { base: base.clone() });
+        }
         let merge_base = match git.run(&["merge-base", &base.refname(), head]) {
             Err(ProcessError::Exit { code: 1, .. }) => {
                 return Err(Error::NoCommonHistory {

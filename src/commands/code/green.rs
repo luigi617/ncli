@@ -43,7 +43,7 @@ impl Green {
 }
 
 struct Check {
-    argv: Vec<String>,
+    shown: String,
     cli: Cli,
 }
 
@@ -51,7 +51,8 @@ impl Check {
     fn new(argv: &[String]) -> Result<Self, Error> {
         process::require_executables([OsStr::new(&argv[0])])?;
         Ok(Self {
-            argv: argv.to_owned(),
+            shown: shlex::try_join(argv.iter().map(String::as_str))
+                .expect("command-line arguments cannot hold a NUL"),
             cli: Cli::new(argv).echo(),
         })
     }
@@ -85,7 +86,7 @@ impl Check {
 
 impl fmt::Display for Check {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.argv.join(" "))
+        f.write_str(&self.shown)
     }
 }
 

@@ -539,6 +539,34 @@ esac
     }
 
     #[test]
+    fn a_default_branch_that_has_not_been_fetched_is_reported() {
+        let repo = repo();
+        let origin = TempDir::new().unwrap();
+        git(
+            origin.path(),
+            &["init", "--quiet", "--bare", "--initial-branch", "main"],
+        );
+        let origin = origin.path().to_str().unwrap();
+        git(repo.path(), &["push", "--quiet", origin, "main"]);
+        git(repo.path(), &["remote", "add", "origin", origin]);
+        git(
+            repo.path(),
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        git(
+            repo.path(),
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        let error = local_review_error(repo.path());
+        assert!(
+            error.contains(
+                "ncli code review: error: origin/main has not been fetched; fetch it first"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_branch_without_common_history_is_reported() {
         let repo = repo();
         git(repo.path(), &["switch", "--quiet", "--orphan", "unrelated"]);

@@ -41,10 +41,11 @@ pub enum ProcessError {
     Cancelled { name: String, stdout: String },
     #[error("{name} exited, but a process it started kept its output open")]
     OutputHeldOpen { name: String, stdout: String },
-    #[error("{name} was killed by signal {signal}")]
+    #[error("{name} was killed by signal {signal}{}", detail(.stderr_tail))]
     Signal {
         name: String,
         signal: i32,
+        stderr_tail: String,
         stdout: String,
     },
     #[error("{name} exited with code {code}{}", detail(.stderr_tail))]
@@ -220,6 +221,7 @@ fn failure(call: &Call, outcome: Outcome) -> ProcessError {
         return ProcessError::Signal {
             name,
             signal,
+            stderr_tail: last_lines(&outcome.stderr),
             stdout: outcome.stdout,
         };
     }

@@ -85,22 +85,11 @@ impl Ship {
         process::require_executables([OsStr::new("git"), OsStr::new(GH)])?;
         let agent = AgentKind::first_available()?;
         let cancellation = context.cancellation;
-        let worktree = Worktree::snapshot(cancellation)?;
-        let repo = worktree.repo.as_path();
+        let toplevel = Git::toplevel(cancellation)?;
+        let repo = toplevel.as_path();
         let git = Git::new(repo, cancellation);
-        if let Some(operation) = git.in_progress()? {
-            return Err(Error::OperationInProgress {
-                repo: repo.to_owned(),
-                operation,
-            });
-        }
-        let unmerged = git.unmerged()?;
-        if !unmerged.is_empty() {
-            return Err(Error::UnmergedPaths {
-                repo: repo.to_owned(),
-                paths: unmerged.join(", "),
-            });
-        }
+        git.ensure_idle()?;
+        let worktree = Worktree::snapshot(cancellation)?;
         let into = git.remote_branch(self.into.as_deref())?;
         git.fetch(&into)?;
         let Some(head) = &worktree.head.commit else {
@@ -130,31 +119,31 @@ impl Ship {
             &SCHEMA,
             cancellation,
         )?;
-        let unshipped = unshipped(&git, &worktree, head, &target, &shipment.url)
+        let shipped = shipped(&git, &worktree, head, &target, &shipment.url)
             .map_err(|error| error.resumable(&step.resume))?;
-        match unshipped {
-            Some(problem) => Err(Error::Unshipped {
+        shipped.map_err(|problem| {
+            Error::Unshipped {
                 agent: agent.name.clone(),
                 into: Box::new(into),
                 problem: Box::new(problem),
                 report: step.report,
             }
-            .resumable(&step.resume)),
-            None => Ok(shipment.url),
-        }
+            .resumable(&step.resume)
+        })
     }
 }
 
-fn unshipped(
+// The URL of the pull request the work was shipped as, as gh reports it.
+fn shipped(
     git: &Git,
     worktree: &Worktree,
     start: &str,
     target: &Target,
     url: &str,
-) -> Result<Option<Unshipped>, Error> {
+) -> Result<Result<String, Unshipped>, Error> {
     let dirty = git.uncommitted()?;
     if !dirty.is_empty() {
-        return Ok(Some(Unshipped::Dirty(dirty.join(", "))));
+        return Ok(Err(Unshipped::Dirty(dirty.join(", "))));
     }
     let head = git.head()?;
     let (Some(branch), Some(commit)) = (
@@ -162,14 +151,14 @@ fn unshipped(
             .filter(|&branch| target.ships_from(branch)),
         &head.commit,
     ) else {
-        return Ok(Some(Unshipped::Unbranched(Box::new(head))));
+        return Ok(Err(Unshipped::Unbranched(Box::new(head))));
     };
     if !git.is_ancestor(start, commit)? {
-        return Ok(Some(Unshipped::Dropped(start.to_owned())));
+        return Ok(Err(Unshipped::Dropped(start.to_owned())));
     }
     let tree = git.run(&["rev-parse", &format!("{commit}^{{tree}}")])?;
     if tree != worktree.tree {
-        return Ok(Some(Unshipped::Altered {
+        return Ok(Err(Unshipped::Altered {
             expected: worktree.tree.clone(),
             found: tree,
         }));
@@ -179,14 +168,15 @@ fn unshipped(
         &[
             "pr",
             "view",
-            url,
             "--json",
             "url,state,baseRefName,headRefName,headRefOid,isCrossRepository",
+            "--",
+            url,
         ],
     )?;
     let pr: PullRequest = serde_json::from_str(&viewed).map_err(Error::GhOutput)?;
     if pr.is_cross_repository || !pr.url.starts_with(&format!("{}/pull/", target.repository)) {
-        return Ok(Some(Unshipped::Elsewhere {
+        return Ok(Err(Unshipped::Elsewhere {
             url: pr.url,
             repository: target.repository.to_owned(),
         }));
@@ -197,15 +187,18 @@ fn unshipped(
         ("head branch", branch, pr.head_ref_name),
         ("head commit", commit.as_str(), pr.head_ref_oid),
     ];
-    Ok(expected
+    let mismatch = expected
         .into_iter()
-        .find(|(_, expected, found)| expected != found)
-        .map(|(field, expected, found)| Unshipped::Mismatch {
+        .find(|(_, expected, found)| expected != found);
+    Ok(match mismatch {
+        Some((field, expected, found)) => Err(Unshipped::Mismatch {
             url: pr.url,
             field,
             expected: expected.to_owned(),
             found,
-        }))
+        }),
+        None => Ok(pr.url),
+    })
 }
 
 fn gh(git: &Git, args: &[&str]) -> Result<String, ProcessError> {

@@ -44,18 +44,16 @@ struct Rebase<'a> {
     branch: &'a str,
     old: &'a str,
     from: &'a RemoteBranch,
+    onto: &'a str,
 }
 
 impl Sync {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
-        // Rejects edits git status does not show, which putting the branch back would discard.
-        let worktree = Worktree::snapshot(context.cancellation)?;
-        let repo = worktree.repo;
+        let repo = Git::toplevel(context.cancellation)?;
         let git = Git::new(&repo, context.cancellation);
-        if let Some(operation) = git.in_progress()? {
-            return Err(Error::OperationInProgress { repo, operation });
-        }
-        let head = worktree.head;
+        git.ensure_idle()?;
+        // Rejects edits git status does not show, which putting the branch back would discard.
+        let head = Worktree::snapshot(context.cancellation)?.head;
         let (Some(branch), Some(old)) = (head.branch_name(), &head.commit) else {
             return Err(Error::NotOnABranch {
                 repo: repo.clone(),
@@ -72,12 +70,8 @@ impl Sync {
         let from = git.remote_branch(self.from.as_deref())?;
         let agent = AgentKind::first_available()?;
         context.progress(&format!("fetching {from}"));
-        git.fetch(&from)?;
-        let merges = git.run(&[
-            "rev-list",
-            "--merges",
-            &format!("{}..{old}", from.refname()),
-        ])?;
+        let onto = git.fetch(&from)?;
+        let merges = git.run(&["rev-list", "--merges", &format!("{onto}..{old}")])?;
         if !merges.is_empty() {
             return Err(Error::MergeCommits {
                 branch: branch.to_owned(),
@@ -91,6 +85,7 @@ impl Sync {
             branch,
             old,
             from: &from,
+            onto: &onto,
         };
         let resolved = rebase
             .run(&agent, context)
@@ -110,11 +105,13 @@ impl Sync {
 
 impl Rebase<'_> {
     fn run(&self, agent: &Agent, context: &Context) -> Result<Option<Performed>, Error> {
+        // The merge backend, whatever rebase.backend says, lets the agent commit before continuing.
         let Err(error) = self.git.run(&[
             "rebase",
+            "--merge",
             "--quiet",
             "--no-update-refs",
-            &self.from.refname(),
+            self.onto,
         ]) else {
             return Ok(None);
         };
@@ -149,7 +146,7 @@ impl Rebase<'_> {
         if head.branch_name() != Some(self.branch) {
             return Ok(Some(Unsynced::LeftBranch(Box::new(head))));
         }
-        if !self.git.is_ancestor(&self.from.refname(), "HEAD")? {
+        if !self.git.is_ancestor(self.onto, "HEAD")? {
             return Ok(Some(Unsynced::NotOnto(self.from.clone())));
         }
         let dirty = self.git.uncommitted()?;
@@ -176,7 +173,7 @@ impl Rebase<'_> {
                 "-z",
                 "--date=raw",
                 &format!("--format={format}"),
-                &format!("{}..{tip}", self.from.refname()),
+                &format!("{}..{tip}", self.onto),
             ])
         };
         let replayed = log(IDENTITY, "HEAD")?;
@@ -185,7 +182,7 @@ impl Rebase<'_> {
             *rebased.entry(identity).or_default() += 1;
         }
         let original = log(&format!("%H%n{IDENTITY}"), self.old)?;
-        let cherry = self.git.run(&["cherry", &self.from.refname(), self.old])?;
+        let cherry = self.git.run(&["cherry", self.onto, self.old])?;
         let upstream: HashSet<&str> = cherry
             .lines()
             .filter_map(|line| line.strip_prefix("- "))
@@ -220,28 +217,25 @@ impl Rebase<'_> {
         Ok(dropped)
     }
 
-    // The files the branch changes that have a line starting with a conflict marker that neither
-    // the branch nor the target had in that file.
+    // The files with a line starting with a conflict marker that neither the branch nor the target
+    // had in that file.
     fn marked(&self) -> Result<Vec<String>, ProcessError> {
-        let target = self.from.refname();
-        let changed = self.git.run(&[
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--diff-filter=d",
-            &target,
-            "HEAD",
-        ])?;
-        if changed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let changed: HashSet<&str> = changed.split_terminator('\0').collect();
-        // Not limited to the changed paths, which can be too many to pass as arguments.
+        // The output format is pinned, since user config can color it or add line numbers.
         let found = self
             .git
             .optional(&[
-                "grep", "-I", "-z", "-E", "-e", MARKERS, "HEAD", &target, self.old,
+                "grep",
+                "--no-color",
+                "--no-line-number",
+                "--no-column",
+                "-I",
+                "-z",
+                "-E",
+                "-e",
+                MARKERS,
+                "HEAD",
+                self.onto,
+                self.old,
             ])?
             .unwrap_or_default();
         // Each match is `<rev>:<path>\0<line>\n`; a path may hold a newline but a line cannot.
@@ -253,7 +247,7 @@ impl Rebase<'_> {
             lines.push((location, line));
             location = next;
         }
-        let prefixes = [format!("{target}:"), format!("{}:", self.old)];
+        let prefixes = [format!("{}:", self.onto), format!("{}:", self.old)];
         let before: HashSet<(&str, &str)> = lines
             .iter()
             .filter_map(|(location, line)| {
@@ -268,10 +262,7 @@ impl Rebase<'_> {
             let Some(path) = location.strip_prefix("HEAD:") else {
                 continue;
             };
-            if changed.contains(path)
-                && !before.contains(&(path, line))
-                && marked.last().is_none_or(|last| last != path)
-            {
+            if !before.contains(&(path, line)) && marked.last().is_none_or(|last| last != path) {
                 marked.push(path.to_owned());
             }
         }
@@ -303,14 +294,16 @@ impl Rebase<'_> {
              with conflicts. Finish the rebase. At each stop, resolve the conflicts with code \
              that keeps the intent of both sides: what the commit being applied changes, seen \
              with `git show REBASE_HEAD`, and what changed on {from}, seen with `git log -p \
-             REBASE_HEAD..{target} -- <path>`. Then stage the resolved files and continue with \
-             `GIT_EDITOR=: git rebase --continue`, until the rebase is done. \
+             REBASE_HEAD..{onto} -- <path>`. Then stage the resolved files, commit them with \
+             `git commit --no-edit --no-verify --cleanup=verbatim -C REBASE_HEAD` so the commit \
+             keeps its message as it is and runs no hooks, as `git rebase --continue` would. \
+             Then continue with `GIT_EDITOR=: git rebase --continue`, until the rebase is done. \
              Do not abort the rebase, and do not skip a commit with `git rebase --skip`. Do not \
              switch branches, reset, stash, or push. \
              In report, say how you resolved each conflict.",
             branch = self.branch,
             from = self.from,
-            target = self.from.refname(),
+            onto = self.onto,
             repo = self.git.cwd.display(),
         )
     }
@@ -319,7 +312,7 @@ impl Rebase<'_> {
 // Works wherever the agent left HEAD, even on another branch.
 fn put_back(git: &Git, branch: &str, old: &str) -> Result<(), ProcessError> {
     if let Some(operation) = git.in_progress()? {
-        git.run(&[&operation.to_string(), "--abort"])?;
+        git.run(&[operation.command(), "--abort"])?;
     }
     git.run(&[
         "switch",

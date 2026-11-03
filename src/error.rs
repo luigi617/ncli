@@ -70,6 +70,8 @@ pub enum Error {
         "the current branch in {} has no history in common with {base}", .repo.display()
     )]
     NoCommonHistory { repo: PathBuf, base: RemoteBranch },
+    #[error("{base} has not been fetched; fetch it first")]
+    Unfetched { base: RemoteBranch },
     #[error(
         "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
     )]
@@ -287,6 +289,7 @@ impl Error {
             | Self::NoLocalChange(_)
             | Self::NoChanges { .. }
             | Self::NoCommonHistory { .. }
+            | Self::Unfetched { .. }
             | Self::DirtySubmodules { .. }
             | Self::HiddenEdits(_)
             | Self::NestedRepositories(_)

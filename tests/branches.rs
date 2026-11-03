@@ -25,7 +25,8 @@ next() {
 answer() {
     echo '{"completed": '"${FAKE_COMPLETED:-true}"', "report": "'"$1"' report '"$count"'"'"$2"'}'
 }
-RESOLVE="printf 'resolved\\n' > README.md && git add README.md && GIT_EDITOR=: git rebase --continue"
+RESOLVE="printf 'resolved\\n' > README.md && git add README.md \
+&& git commit --quiet --no-edit --no-verify --cleanup=verbatim -C REBASE_HEAD && GIT_EDITOR=: git rebase --continue"
 SHIP='case "$prompt" in *"Create a new branch"*) git switch --quiet --create add-feature ;; esac
 git add --all && { git diff --cached --quiet || git commit --quiet --message "Add a feature."; } &&
 git push --quiet --set-upstream origin HEAD'
@@ -33,7 +34,7 @@ case "$prompt" in
 *"as a pull request against"*)
     next ship
     eval "${FAKE_SHIP:-$SHIP}" >&2
-    answer ship ', "url": "https://example.com/owner/repo/pull/1"' ;;
+    answer ship ', "url": "'"${FAKE_SHIP_URL-https://example.com/owner/repo/pull/1}"'"' ;;
 *"The check \`"*)
     next fix
     eval "${FAKE_FIX:-touch fixed}"
@@ -55,7 +56,8 @@ case "$1 $2" in
     [ -z "$FAKE_GH_PR_FAILS" ] || { echo "not logged in" >&2; exit 1; }
     branch=$(git branch --show-current)
     oid=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")
-    echo '{"url": "'"${FAKE_GH_URL:-$3}"'", "state": "'"${FAKE_GH_STATE:-OPEN}"'", "baseRefName": "'"${FAKE_GH_BASE:-main}"'", "headRefName": "'"${FAKE_GH_HEAD:-$branch}"'", "headRefOid": "'"$oid"'", "isCrossRepository": '"${FAKE_GH_CROSS:-false}"'}' ;;
+    eval "selector=\${$#}"
+    echo '{"url": "'"${FAKE_GH_URL:-$selector}"'", "state": "'"${FAKE_GH_STATE:-OPEN}"'", "baseRefName": "'"${FAKE_GH_BASE:-main}"'", "headRefName": "'"${FAKE_GH_HEAD:-$branch}"'", "headRefOid": "'"$oid"'", "isCrossRepository": '"${FAKE_GH_CROSS:-false}"'}' ;;
 esac
 "#;
 
@@ -241,8 +243,9 @@ esac
     mod ship {
         use super::*;
 
-        const VIEW: &str = "pr view https://example.com/owner/repo/pull/1 --json \
-            url,state,baseRefName,headRefName,headRefOid,isCrossRepository";
+        const VIEW: &str = "pr view --json \
+            url,state,baseRefName,headRefName,headRefOid,isCrossRepository -- \
+            https://example.com/owner/repo/pull/1";
 
         #[test]
         fn uncommitted_changes_on_the_default_branch_become_a_new_pull_request() {
@@ -503,6 +506,18 @@ esac
         }
 
         #[test]
+        fn the_url_shown_is_the_one_gh_reports() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let url = "https://example.com/owner/repo/pull/7";
+            let (stdout, _) = env.succeed(
+                &["code", "ship"],
+                &[("FAKE_SHIP_URL", ""), ("FAKE_GH_URL", url)],
+            );
+            assert_eq!(stdout, format!("{url}\n"));
+        }
+
+        #[test]
         fn a_pull_request_from_another_repository_is_an_error() {
             let env = Env::new();
             env.write("feature.rs", "fn f() {}\n");
@@ -718,7 +733,7 @@ esac
             let (stdout, stderr) = env.succeed(&green(&[]), &[]);
             assert_eq!(
                 stdout,
-                "`sh -c echo CHECK OUTPUT; test -f fixed` passes; there was nothing to fix.\n"
+                "`sh -c 'echo CHECK OUTPUT; test -f fixed'` passes; there was nothing to fix.\n"
             );
             assert!(stderr.contains("CHECK OUTPUT"), "{stderr}");
             assert_eq!(env.count("fix"), 0);
@@ -749,13 +764,32 @@ esac
         }
 
         #[test]
+        fn the_agent_sees_what_a_check_killed_by_a_signal_wrote_to_stderr() {
+            let env = Env::new();
+            let check = [
+                "code",
+                "green",
+                "--",
+                "sh",
+                "-c",
+                "test -f fixed || { echo BOOM >&2; kill -ABRT $$; }",
+            ];
+            env.succeed(&check, &[]);
+            let prompt = env.logged("fix.1").unwrap();
+            assert!(
+                prompt.contains("sh was killed by signal 6: BOOM\n</output>"),
+                "{prompt}"
+            );
+        }
+
+        #[test]
         fn a_check_that_still_fails_after_the_last_round_is_an_error() {
             let env = Env::new();
             let fix = ("FAKE_FIX", "echo more >> notes.txt");
             let stderr = env.fail(&green(&["--max-rounds", "2"]), &[fix]);
             assert!(
                 stderr.contains(
-                    "error: `sh -c echo CHECK OUTPUT; test -f fixed` still fails after 2 round(s) \
+                    "error: `sh -c 'echo CHECK OUTPUT; test -f fixed'` still fails after 2 round(s) \
                      of fixes:\n\nfix report 1\n\nResume: "
                 ),
                 "{stderr}"
@@ -828,7 +862,7 @@ esac
             let stderr = env.fail(&check, &[]);
             assert!(
                 stderr.contains("error: HEAD in ")
-                    && stderr.contains(" while `sh -c git commit --allow-empty -qm x` ran;"),
+                    && stderr.contains(" while `sh -c 'git commit --allow-empty -qm x'` ran;"),
                 "{stderr}"
             );
             assert_eq!(env.count("fix"), 0);
@@ -912,13 +946,18 @@ esac
             let env = Env::new();
             env.git(&["remote", "set-head", "origin", "--delete"]);
             feature(&env, "feature.rs", "fn f() {}\n");
-            let upstream = env.push_upstream("main", "README.md", "upstream\n");
+            env.push_upstream("main", "README.md", "upstream\n");
+            let trunk = env.push_upstream("trunk", "trunk.txt", "trunk\n");
+            git(
+                env.origin.path(),
+                &["symbolic-ref", "HEAD", "refs/heads/trunk"],
+            );
             let (stdout, _) = env.succeed(&["code", "sync"], &[]);
             assert!(
-                stdout.starts_with("Rebased feature onto origin/main, "),
+                stdout.starts_with("Rebased feature onto origin/trunk, "),
                 "{stdout}"
             );
-            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), upstream);
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), trunk);
         }
 
         #[test]
@@ -978,6 +1017,12 @@ esac
             assert!(
                 prompt.contains(
                     "A rebase of the branch feature onto origin/main in the repository at "
+                ),
+                "{prompt}"
+            );
+            assert!(
+                prompt.contains(
+                    "`git commit --no-edit --no-verify --cleanup=verbatim -C REBASE_HEAD`"
                 ),
                 "{prompt}"
             );
@@ -1243,6 +1288,115 @@ esac
             assert_eq!(env.git(&["status", "--porcelain"]), "");
         }
 
+        fn configure_grep(env: &Env) {
+            for (key, value) in [
+                ("color.ui", "always"),
+                ("grep.lineNumber", "true"),
+                ("grep.column", "true"),
+            ] {
+                env.git(&["config", key, value]);
+            }
+        }
+
+        #[test]
+        fn conflict_markers_are_found_whatever_the_grep_config() {
+            let env = Env::new();
+            let old = feature(&env, "README.md", "feature\n");
+            env.push_upstream("main", "README.md", "<<<<<<< upstream\n");
+            configure_grep(&env);
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", MARKED)]);
+            assert_unfinished(&stderr, "conflict markers are left in README.md");
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn marker_like_lines_that_moved_are_allowed_whatever_the_grep_config() {
+            let env = Env::new();
+            env.write("fixture.txt", "1\n2\n3\n4\n<<<<<<< fixture\n");
+            env.commit("Fixture.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write("README.md", "feature\n");
+            env.write("fixture.txt", "0\n1\n2\n3\n4\n<<<<<<< fixture\n");
+            env.commit("Feature.");
+            env.change_upstream("main", |clone| {
+                fs::write(clone.join("README.md"), "upstream\n").unwrap();
+                fs::write(
+                    clone.join("fixture.txt"),
+                    "1\n2\n3\n4\n4b\n<<<<<<< fixture\n",
+                )
+                .unwrap();
+            });
+            configure_grep(&env);
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(
+                fs::read_to_string(env.work.path().join("fixture.txt")).unwrap(),
+                "0\n1\n2\n3\n4\n4b\n<<<<<<< fixture\n"
+            );
+        }
+
+        #[test]
+        fn a_rebase_backend_set_in_config_does_not_stop_the_agent_committing() {
+            let env = Env::new();
+            conflicting(&env);
+            env.git(&["config", "rebase.backend", "apply"]);
+            env.succeed(&["code", "sync"], &[]);
+            assert!(!env.rebasing());
+        }
+
+        #[test]
+        fn a_target_fetched_again_during_the_resolution_does_not_fail_the_sync() {
+            let env = Env::new();
+            let (_, upstream) = conflicting(&env);
+            let moved = "eval \"$RESOLVE\" && git update-ref refs/remotes/origin/main \
+                $(git commit-tree -p HEAD -m later HEAD^{tree})";
+            let (stdout, _) = env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", moved)]);
+            assert!(
+                stdout.starts_with("Rebased feature onto origin/main, "),
+                "{stdout}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), upstream);
+            let prompt = env.logged("resolve.1").unwrap();
+            assert!(
+                prompt.contains(&format!("REBASE_HEAD..{upstream} -- <path>")),
+                "{prompt}"
+            );
+        }
+
+        #[test]
+        fn conflict_markers_are_judged_against_the_fetched_target() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let moved = format!(
+                "{MARKED} && git update-ref refs/remotes/origin/main \
+                 $(git commit-tree -p HEAD -m later HEAD^{{tree}})"
+            );
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &moved)]);
+            assert_unfinished(&stderr, "conflict markers are left in README.md");
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_sequence_the_agent_leaves_in_progress_is_ended_when_putting_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            env.git(&["switch", "--quiet", "--create", "side", "main"]);
+            env.write("README.md", "one\n");
+            env.commit("One.");
+            env.write("README.md", "two\n");
+            env.commit("Two.");
+            env.git(&["switch", "--quiet", "feature"]);
+            let sequence = "eval \"$RESOLVE\" && { git cherry-pick side~2..side; \
+                printf 'x\\n' > README.md && git add README.md && git commit --quiet -m x; }";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", sequence)]);
+            assert_unfinished(
+                &stderr,
+                "a cherry-pick or revert sequence is still in progress",
+            );
+            assert_restored(&env, &old);
+            assert!(!env.work.path().join(".git/sequencer").exists());
+        }
+
         #[test]
         fn longer_conflict_markers_are_found() {
             let env = Env::new();
@@ -1489,6 +1643,88 @@ esac
                 stderr.contains("error: a merge is already in progress in "),
                 "{stderr}"
             );
+        }
+
+        #[test]
+        fn unresolved_conflicts_are_refused() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write("README.md", "stashed\n");
+            env.git(&["stash", "--quiet"]);
+            env.write("README.md", "feature\n");
+            env.commit("Feature.");
+            let pop = Command::new("git")
+                .args(["stash", "pop"])
+                .current_dir(env.work.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(!pop.status.success());
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains(
+                    "has unresolved conflicts in README.md; resolve and stage them first"
+                ),
+                "{stderr}"
+            );
+            assert_eq!(env.count("resolve"), 0);
+        }
+
+        #[test]
+        fn a_cherry_pick_sequence_still_in_progress_is_refused() {
+            let env = Env::new();
+            let old = feature(&env, "README.md", "one\n");
+            env.write("README.md", "two\n");
+            env.commit("Two.");
+            env.git(&["switch", "--quiet", "main"]);
+            env.write("README.md", "main\n");
+            env.commit("Main.");
+            env.git(&["switch", "--quiet", "--create", "picked"]);
+            let pick = Command::new("git")
+                .args(["cherry-pick", &format!("{old}~1..feature")])
+                .current_dir(env.work.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(!pick.status.success());
+            env.write("README.md", "resolved\n");
+            env.commit("Resolved.");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr
+                    .contains("error: a cherry-pick or revert sequence is already in progress in "),
+                "{stderr}"
+            );
+            assert_eq!(env.count("resolve"), 0);
+        }
+
+        #[test]
+        fn an_operation_in_progress_is_reported_before_the_working_tree_is_judged() {
+            let env = Env::new();
+            conflicting(&env);
+            env.git(&["fetch", "--quiet", "origin"]);
+            let merge = Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=x",
+                    "-c",
+                    "user.email=x",
+                    "merge",
+                    "origin/main",
+                ])
+                .current_dir(env.work.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(!merge.status.success());
+            env.write("README.md", "feature\n");
+            for command in ["sync", "ship"] {
+                let stderr = env.fail(&["code", command], &[]);
+                assert!(
+                    stderr.contains("error: a merge is already in progress in "),
+                    "{stderr}"
+                );
+            }
         }
 
         #[test]
