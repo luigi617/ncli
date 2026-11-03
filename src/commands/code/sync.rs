@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use clap::Args;
 use clap::builder::NonEmptyStringValueParser;
@@ -98,7 +98,12 @@ impl Sync {
 
 impl Rebase<'_> {
     fn run(&self, agent: &Agent, context: &Context) -> Result<Option<Performed>, Error> {
-        let Err(error) = self.git.run(&["rebase", "--quiet", &self.from.refname()]) else {
+        let Err(error) = self.git.run(&[
+            "rebase",
+            "--quiet",
+            "--no-update-refs",
+            &self.from.refname(),
+        ]) else {
             return Ok(None);
         };
         if !matches!(error, ProcessError::Exit { .. })
@@ -205,27 +210,17 @@ impl Rebase<'_> {
         if changed.is_empty() {
             return Ok(Vec::new());
         }
-        let grep: Vec<&str> = [
-            "--literal-pathspecs",
-            "grep",
-            "-I",
-            "-l",
-            "-z",
-            "-E",
-            "-e",
-            MARKERS,
-            "HEAD",
-            "--",
-        ]
-        .into_iter()
-        .chain(changed.split_terminator('\0'))
-        .collect();
-        Ok(self
+        let changed: HashSet<&str> = changed.split_terminator('\0').collect();
+        // Not limited to the changed paths, which can be too many to pass as arguments.
+        let found = self
             .git
-            .optional(&grep)?
-            .unwrap_or_default()
+            .optional(&["grep", "-I", "-l", "-z", "-E", "-e", MARKERS, "HEAD"])?
+            .unwrap_or_default();
+        Ok(found
             .split_terminator('\0')
-            .map(|found| found.strip_prefix("HEAD:").unwrap_or(found).to_owned())
+            .map(|found| found.strip_prefix("HEAD:").unwrap_or(found))
+            .filter(|path| changed.contains(path))
+            .map(str::to_owned)
             .collect())
     }
 

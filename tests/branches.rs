@@ -1123,6 +1123,38 @@ esac
             assert_eq!(env.git(&["status", "--porcelain"]), "?? scratch.txt");
         }
 
+        #[test]
+        fn a_failed_sync_leaves_other_branches_in_the_rebased_range_alone() {
+            let env = Env::new();
+            conflicting(&env);
+            env.git(&["branch", "part"]);
+            env.write("more.rs", "fn g() {}\n");
+            let old = env.commit("More.");
+            env.git(&["config", "rebase.updateRefs", "true"]);
+            let part = env.git(&["rev-parse", "part"]);
+            let junk = ("FAKE_RESOLVE", "eval \"$RESOLVE\" && echo junk > junk");
+            env.fail(&["code", "sync"], &[junk]);
+            assert_restored(&env, &old);
+            assert_eq!(env.git(&["rev-parse", "part"]), part);
+        }
+
+        #[test]
+        fn a_branch_that_changes_many_files_is_checked_for_conflict_markers() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            let dir = env.work.path().join("vendor").join("x".repeat(200));
+            fs::create_dir_all(&dir).unwrap();
+            for index in 0..8_000 {
+                fs::write(dir.join(format!("{index:0>200}")), "").unwrap();
+            }
+            env.write("README.md", "feature\n");
+            let old = env.commit("Feature.");
+            env.push_upstream("main", "README.md", "upstream\n");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", MARKED)]);
+            assert_unfinished(&stderr, "conflict markers are left in README.md");
+            assert_restored(&env, &old);
+        }
+
         const MARKED: &str = "printf '<<<<<<< HEAD\\nx\\n=======\\ny\\n>>>>>>> c\\n' > README.md \
             && git add README.md && GIT_EDITOR=: git rebase --continue";
 
