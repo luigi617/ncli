@@ -1,7 +1,9 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::review::{Change, Head, RemoteBranch};
+use crate::commands::code::git::{Head, Operation, RemoteBranch};
+use crate::commands::code::review::Change;
+use crate::commands::code::{Unresolved, Unusable};
 use crate::commands::session::SessionName;
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
@@ -29,12 +31,10 @@ pub enum Error {
     #[error("the judge could not access {0}")]
     ChangeUnavailable(Change),
     #[error(
-        "the repository has no default branch to compare the current branch with; set one with `git remote set-head <remote> --auto`"
+        "the repository has no default branch; set one with `git remote set-head <remote> --auto`"
     )]
     NoDefaultBranch,
-    #[error(
-        "the repository has several default branches to compare the current branch with ({branches}) and none on {preferred}"
-    )]
+    #[error("the repository has several default branches ({branches}) and none on {preferred}")]
     AmbiguousDefaultBranch {
         branches: String,
         preferred: &'static str,
@@ -58,21 +58,68 @@ pub enum Error {
     )]
     NoCommonHistory { repo: PathBuf, base: RemoteBranch },
     #[error(
-        "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
+        "the uncommitted changes inside submodules of {} cannot be included ({submodules}); commit them in the submodules first", .repo.display()
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
+        "files marked assume-unchanged or skip-worktree have edits that would be missed ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
     )]
     HiddenEdits(String),
     #[error(
-        "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
+        "untracked git repositories cannot be included ({0}); ignore them or add them as submodules"
     )]
     NestedRepositories(String),
     #[error(
-        "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
+        "the working tree undoes staged changes that would be missed ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
     )]
     UndoneStagedChanges(String),
+    #[error(
+        "there is nothing to ship in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
+    )]
+    NothingToShip { repo: PathBuf, base: RemoteBranch },
+    #[error("a {operation} is in progress in {}; finish or abort it first", .repo.display())]
+    OperationInProgress { repo: PathBuf, operation: Operation },
+    #[error("HEAD is {0}, not a branch to rebase")]
+    NotOnBranch(Box<Head>),
+    #[error(
+        "the working tree in {} has uncommitted changes or untracked files ({paths}); commit, stash, or remove them first", .repo.display()
+    )]
+    UncommittedChanges { repo: PathBuf, paths: String },
+    #[error("could not rebase {branch} onto {from}, so it was put back at {tip}: {source}")]
+    NotSynced {
+        branch: String,
+        from: String,
+        tip: String,
+        source: Box<Error>,
+    },
+    #[error(
+        "could not rebase {branch} onto {from}: {source}\nputting it back at {tip} also failed: {restore}"
+    )]
+    NotRestored {
+        branch: String,
+        from: String,
+        tip: String,
+        source: Box<Error>,
+        restore: Box<ProcessError>,
+    },
+    #[error("could not read the rebase state: {0}")]
+    RebaseState(#[source] io::Error),
+    #[error(transparent)]
+    Unresolved(#[from] Unresolved),
+    #[error("{agent} changed the work in {} while describing it, so it was not shipped", .repo.display())]
+    ChangedWhileDescribing { agent: String, repo: PathBuf },
+    #[error("{agent} gave an answer that cannot be shipped: {problem}")]
+    UnusableAnswer { agent: String, problem: Unusable },
+    #[error(
+        "{branch} tracks {upstream}, but ncli would push it to {pushed}; push it there yourself, or stop tracking with `git branch --unset-upstream`"
+    )]
+    OtherUpstream {
+        branch: String,
+        upstream: RemoteBranch,
+        pushed: RemoteBranch,
+    },
+    #[error("gh returned unexpected output: {0}")]
+    GhOutput(#[source] serde_json::Error),
     #[error("{agent} left no changes in {} to review: {}", .repo.display(), .report.trim())]
     NothingImplemented {
         agent: String,
@@ -183,7 +230,9 @@ impl Error {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,
             Self::EmptyTask | Self::NotATask(_) => Self::USAGE,
-            Self::Resumable { source, .. } => source.exit_code(),
+            Self::Resumable { source, .. }
+            | Self::NotSynced { source, .. }
+            | Self::NotRestored { source, .. } => source.exit_code(),
             Self::WorkingDirectory(_)
             | Self::InvalidAnswer { .. }
             | Self::NoSession(_)
@@ -201,6 +250,16 @@ impl Error {
             | Self::NestedRepositories(_)
             | Self::UndoneStagedChanges(_)
             | Self::NothingImplemented { .. }
+            | Self::NothingToShip { .. }
+            | Self::OperationInProgress { .. }
+            | Self::NotOnBranch(_)
+            | Self::UncommittedChanges { .. }
+            | Self::Unresolved(_)
+            | Self::RebaseState(_)
+            | Self::ChangedWhileDescribing { .. }
+            | Self::UnusableAnswer { .. }
+            | Self::OtherUpstream { .. }
+            | Self::GhOutput(_)
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
             | Self::NothingWritten(_)

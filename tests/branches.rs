@@ -1,0 +1,810 @@
+#[cfg(unix)]
+mod common;
+
+#[cfg(unix)]
+mod binary {
+    use std::fs;
+    use std::process::Output;
+
+    use crate::common::{git, ncli, script};
+    use ncli::error::Error;
+    use tempfile::TempDir;
+
+    const FAKE_AGENT: &str = r#"#!/bin/sh
+prompt=$(cat)
+log="$NCLI_TEST_LOG"
+count=$(( $(cat "$log/agent.count" 2>/dev/null || echo 0) + 1 ))
+echo "$count" > "$log/agent.count"
+printf '%s' "$prompt" > "$log/agent.$count"
+RESOLVE='for f in $(git diff --name-only --diff-filter=U); do printf "resolved %s\n" "$count" > "$f"; git add "$f"; done'
+SHIPMENT='{"completed": true, "report": "Adds a feature.", "branch": "add-feature",
+    "commit_message": "Add a feature.", "title": "Add a feature", "body": "Adds it.\n\nIn full."}'
+case "$prompt" in
+*"shipped as a pull request"*)
+    eval "${FAKE_DESCRIBE:-:}" >&2
+    printf '%s\n' "${FAKE_SHIPMENT:-$SHIPMENT}" ;;
+*"stopped with conflicts"*)
+    eval "${FAKE_RESOLVE:-$RESOLVE}" >&2
+    echo '{"completed": true, "report": "Resolved."}' ;;
+esac
+"#;
+
+    const FAKE_GH: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$NCLI_TEST_LOG/gh.log"
+case "$1 $2" in
+"repo view")
+    [ -z "$FAKE_GH_UNAUTHENTICATED" ] || { echo "gh auth login required" >&2; exit 4; }
+    echo '{"url": "https://example.com/owner/repo"}' ;;
+"pr list") echo "${FAKE_GH_OPEN:-[]}" ;;
+"pr create")
+    cat > "$NCLI_TEST_LOG/gh.body"
+    echo "Creating pull request"
+    echo "https://example.com/owner/repo/pull/1" ;;
+esac
+"#;
+
+    struct Env {
+        bin: TempDir,
+        log: TempDir,
+        state: TempDir,
+        origin: TempDir,
+        work: TempDir,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            let env = Self {
+                bin: TempDir::new().unwrap(),
+                log: TempDir::new().unwrap(),
+                state: TempDir::new().unwrap(),
+                origin: TempDir::new().unwrap(),
+                work: TempDir::new().unwrap(),
+            };
+            script(env.bin.path(), "claude", FAKE_AGENT);
+            script(env.bin.path(), "gh", FAKE_GH);
+            git(
+                env.origin.path(),
+                &["init", "--quiet", "--bare", "--initial-branch", "main"],
+            );
+            env.git(&["init", "--quiet", "--initial-branch", "main"]);
+            env.write("README.md", "hello\n");
+            env.commit("Start.");
+            env.git(&[
+                "remote",
+                "add",
+                "origin",
+                env.origin.path().to_str().unwrap(),
+            ]);
+            env.git(&["push", "--quiet", "--set-upstream", "origin", "main"]);
+            env.git(&["remote", "set-head", "origin", "main"]);
+            env
+        }
+
+        fn ncli(&self, args: &[&str], vars: &[(&str, &str)]) -> Output {
+            let output = ncli(self.state.path())
+                .args(args)
+                .current_dir(self.work.path())
+                .env(
+                    "PATH",
+                    format!("{}:/bin:/usr/bin", self.bin.path().display()),
+                )
+                .env("NCLI_TEST_LOG", self.log.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "ncli")
+                .env("GIT_AUTHOR_EMAIL", "ncli@example.com")
+                .env("GIT_COMMITTER_NAME", "ncli")
+                .env("GIT_COMMITTER_EMAIL", "ncli@example.com")
+                .envs(vars.iter().copied())
+                .output()
+                .unwrap();
+            assert_ne!(output.status.code(), Some(Error::USAGE.into()));
+            output
+        }
+
+        fn succeed(&self, args: &[&str], vars: &[(&str, &str)]) -> String {
+            let output = self.ncli(args, vars);
+            assert!(output.status.success(), "{}", stderr(&output));
+            String::from_utf8(output.stdout).unwrap()
+        }
+
+        fn fail(&self, args: &[&str], vars: &[(&str, &str)]) -> String {
+            let output = self.ncli(args, vars);
+            assert_eq!(
+                output.status.code(),
+                Some(Error::FAILURE.into()),
+                "{}",
+                stderr(&output)
+            );
+            assert!(output.stdout.is_empty());
+            stderr(&output)
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            git(self.work.path(), args)
+        }
+
+        fn write(&self, path: &str, contents: &str) {
+            fs::write(self.work.path().join(path), contents).unwrap();
+        }
+
+        fn read(&self, path: &str) -> String {
+            fs::read_to_string(self.work.path().join(path)).unwrap()
+        }
+
+        fn commit(&self, message: &str) -> String {
+            self.git(&["add", "--all"]);
+            self.git(&["commit", "--quiet", "--message", message]);
+            self.git(&["rev-parse", "HEAD"])
+        }
+
+        // Commits to a branch of origin from another clone, as a teammate would.
+        fn push_upstream(&self, branch: &str, path: &str, contents: &str) {
+            let clone = TempDir::new().unwrap();
+            let clone = clone.path();
+            git(
+                clone,
+                &[
+                    "clone",
+                    "--quiet",
+                    self.origin.path().to_str().unwrap(),
+                    ".",
+                ],
+            );
+            git(clone, &["switch", "--quiet", branch]);
+            fs::write(clone.join(path), contents).unwrap();
+            git(clone, &["add", "--all"]);
+            git(clone, &["commit", "--quiet", "--message", "Upstream."]);
+            git(clone, &["push", "--quiet", "origin", branch]);
+        }
+
+        fn origin(&self, name: &str) -> String {
+            git(self.origin.path(), &["rev-parse", name])
+        }
+
+        fn logged(&self, name: &str) -> String {
+            fs::read_to_string(self.log.path().join(name)).unwrap_or_default()
+        }
+
+        fn agent_calls(&self) -> u32 {
+            self.logged("agent.count").trim().parse().unwrap_or(0)
+        }
+
+        fn feature(&self, contents: &[&str]) -> String {
+            self.git(&["switch", "--quiet", "--create", "feature"]);
+            let mut tip = String::new();
+            for (index, content) in contents.iter().enumerate() {
+                self.write("README.md", content);
+                tip = self.commit(&format!("Feature {index}."));
+            }
+            tip
+        }
+
+        // Adds an initialized submodule `sub`, checked out at the first of its two commits.
+        fn submodule(&self) -> (TempDir, String, String) {
+            let sub = TempDir::new().unwrap();
+            git(sub.path(), &["init", "--quiet", "--initial-branch", "main"]);
+            let mut commits = Vec::new();
+            for name in ["one", "two"] {
+                fs::write(sub.path().join(name), "\n").unwrap();
+                git(sub.path(), &["add", "--all"]);
+                git(sub.path(), &["commit", "--quiet", "--message", name]);
+                commits.push(git(sub.path(), &["rev-parse", "HEAD"]));
+            }
+            let url = sub.path().to_str().unwrap();
+            self.git(&[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                url,
+                "sub",
+            ]);
+            git(
+                &self.work.path().join("sub"),
+                &["checkout", "--quiet", &commits[0]],
+            );
+            self.commit("Submodule.");
+            self.git(&["push", "--quiet", "origin", "main"]);
+            let two = commits.pop().unwrap();
+            (sub, commits.pop().unwrap(), two)
+        }
+
+        fn assert_put_back(&self, tip: &str) {
+            assert_eq!(self.git(&["branch", "--show-current"]), "feature");
+            assert_eq!(self.git(&["rev-parse", "HEAD"]), tip);
+            assert_eq!(
+                self.git(&["status", "--porcelain", "--untracked-files=no"]),
+                ""
+            );
+            assert!(!self.work.path().join(".git/rebase-merge").exists());
+        }
+    }
+
+    fn stderr(output: &Output) -> String {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+
+    mod ship {
+        use super::*;
+
+        #[test]
+        fn uncommitted_changes_on_the_default_branch_ship_from_a_new_branch() {
+            let env = Env::new();
+            let start = env.git(&["rev-parse", "HEAD"]);
+            env.write("feature.rs", "fn f() {}\n");
+            let stdout = env.succeed(&["code", "ship"], &[]);
+            assert_eq!(stdout, "https://example.com/owner/repo/pull/1\n");
+            assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), start);
+            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "Add a feature.");
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+            assert_eq!(env.git(&["rev-parse", "main"]), start);
+            assert_eq!(env.origin("add-feature"), env.git(&["rev-parse", "HEAD"]));
+            assert_eq!(
+                env.git(&["rev-parse", "--abbrev-ref", "@{upstream}"]),
+                "origin/add-feature"
+            );
+            assert_eq!(
+                env.logged("gh.log"),
+                "repo view --json url\n\
+                 pr list --head add-feature --base main --state open --json url,isCrossRepository\n\
+                 pr create --base main --head add-feature --title Add a feature --body-file -\n"
+            );
+            assert_eq!(env.logged("gh.body"), "Adds it.\n\nIn full.");
+            let prompt = env.logged("agent.1");
+            assert!(prompt.contains(&format!("`git diff {start}`")), "{prompt}");
+            assert!(prompt.contains("so give its name"), "{prompt}");
+        }
+
+        #[test]
+        fn commits_on_a_feature_branch_ship_from_that_branch() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.git(&["branch", "--show-current"]), "feature");
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
+            assert_eq!(env.origin("feature"), tip);
+            assert!(
+                env.logged("gh.log")
+                    .contains("pr create --base main --head feature")
+            );
+            assert!(env.logged("agent.1").contains("branch is not used"));
+        }
+
+        #[test]
+        fn nothing_to_ship_fails_before_asking_the_agent() {
+            let env = Env::new();
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(stderr.contains("there is nothing to ship"), "{stderr}");
+            assert!(stderr.contains("origin/main"), "{stderr}");
+            assert_eq!(env.agent_calls(), 0);
+            assert_eq!(env.logged("gh.log"), "");
+        }
+
+        #[test]
+        fn an_open_pull_request_is_reported_instead_of_opening_another() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.write("more.rs", "\n");
+            let open = r#"[{"url": "https://example.com/fork/repo/pull/6", "isCrossRepository": true},
+                {"url": "https://example.com/owner/repo/pull/7", "isCrossRepository": false}]"#;
+            let stdout = env.succeed(&["code", "ship"], &[("FAKE_GH_OPEN", open)]);
+            assert_eq!(stdout, "https://example.com/owner/repo/pull/7\n");
+            assert!(!env.logged("gh.log").contains("pr create"));
+            assert_eq!(env.origin("feature"), env.git(&["rev-parse", "HEAD"]));
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+        }
+
+        #[test]
+        fn an_open_pull_request_from_a_fork_is_not_reported() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            let open =
+                r#"[{"url": "https://example.com/fork/repo/pull/6", "isCrossRepository": true}]"#;
+            let stdout = env.succeed(&["code", "ship"], &[("FAKE_GH_OPEN", open)]);
+            assert_eq!(stdout, "https://example.com/owner/repo/pull/1\n");
+            assert!(env.logged("gh.log").contains("pr create"));
+        }
+
+        #[test]
+        fn gh_that_cannot_reach_the_repository_fails_before_the_agent() {
+            let env = Env::new();
+            env.write("feature.rs", "\n");
+            let stderr = env.fail(&["code", "ship"], &[("FAKE_GH_UNAUTHENTICATED", "1")]);
+            assert!(stderr.contains("gh auth login required"), "{stderr}");
+            assert_eq!(env.agent_calls(), 0);
+            assert_eq!(env.git(&["branch", "--show-current"]), "main");
+            assert_eq!(env.git(&["status", "--porcelain"]), "?? feature.rs");
+        }
+
+        fn unusable(shipment: &str, expected: &str) {
+            let env = Env::new();
+            let start = env.git(&["rev-parse", "HEAD"]);
+            env.write("feature.rs", "\n");
+            let shipment =
+                format!(r#"{{"completed": true, "report": "", "body": "", {shipment}}}"#);
+            let stderr = env.fail(&["code", "ship"], &[("FAKE_SHIPMENT", &shipment)]);
+            assert!(
+                stderr.contains(&format!(
+                    "claude gave an answer that cannot be shipped: {expected}"
+                )),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["branch", "--show-current"]), "main");
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
+            assert_eq!(env.git(&["status", "--porcelain"]), "?? feature.rs");
+            assert!(!env.logged("gh.log").contains("pr "));
+        }
+
+        #[test]
+        fn an_empty_commit_message_changes_nothing() {
+            unusable(
+                r#""branch": "b", "commit_message": " \n", "title": "T""#,
+                "the commit message is empty",
+            );
+        }
+
+        #[test]
+        fn an_empty_title_changes_nothing() {
+            unusable(
+                r#""branch": "b", "commit_message": "M.", "title": " ""#,
+                "the title is empty",
+            );
+        }
+
+        #[test]
+        fn an_invalid_branch_name_changes_nothing() {
+            unusable(
+                r#""branch": "add feature", "commit_message": "M.", "title": "T""#,
+                "`add feature` is not a valid branch name",
+            );
+            unusable(
+                r#""branch": "@{-1}", "commit_message": "M.", "title": "T""#,
+                "`@{-1}` is not a valid branch name",
+            );
+        }
+
+        #[test]
+        fn a_branch_name_already_on_the_remote_changes_nothing() {
+            unusable(
+                r#""branch": "main", "commit_message": "M.", "title": "T""#,
+                "`main` is already a branch on origin",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_changes_the_work_while_describing_it_ships_nothing() {
+            let env = Env::new();
+            env.write("feature.rs", "\n");
+            let stderr = env.fail(
+                &["code", "ship"],
+                &[("FAKE_DESCRIBE", "printf 'x\\n' > scratch.md")],
+            );
+            assert!(stderr.contains("claude changed the work in"), "{stderr}");
+            assert_eq!(env.git(&["branch", "--show-current"]), "main");
+            assert_eq!(env.git(&["log", "--format=%s"]), "Start.");
+            assert!(!env.logged("gh.log").contains("pr "));
+        }
+
+        #[test]
+        fn a_branch_that_tracks_its_base_ships_from_that_branch() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.git(&["branch", "--quiet", "--set-upstream-to", "origin/main"]);
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.origin("feature"), tip);
+            assert_eq!(
+                env.git(&["rev-parse", "--abbrev-ref", "@{upstream}"]),
+                "origin/feature"
+            );
+        }
+
+        #[test]
+        fn a_branch_that_tracks_another_name_is_refused_before_the_agent() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.git(&[
+                "push",
+                "--quiet",
+                "--set-upstream",
+                "origin",
+                "feature:luigi/fix",
+            ]);
+            env.write("more.rs", "\n");
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(
+                stderr.contains(
+                    "feature tracks origin/luigi/fix, but ncli would push it to origin/feature"
+                ),
+                "{stderr}"
+            );
+            assert_eq!(env.agent_calls(), 0);
+            assert_eq!(env.origin("luigi/fix"), tip);
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
+            assert!(!env.logged("gh.log").contains("pr "));
+        }
+
+        #[test]
+        fn into_needs_no_default_branch() {
+            let env = Env::new();
+            env.git(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+            env.write("feature.rs", "\n");
+            env.succeed(&["code", "ship", "--into", "main"], &[]);
+            assert!(
+                env.logged("gh.log")
+                    .contains("pr create --base main --head add-feature")
+            );
+        }
+
+        #[test]
+        fn into_opens_the_pull_request_against_another_branch() {
+            let env = Env::new();
+            env.git(&["push", "--quiet", "origin", "main:release"]);
+            env.write("feature.rs", "\n");
+            env.succeed(&["code", "ship", "--into", "release"], &[]);
+            assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
+            assert!(
+                env.logged("gh.log")
+                    .contains("pr create --base release --head add-feature")
+            );
+        }
+    }
+
+    mod sync {
+        use super::*;
+
+        #[test]
+        fn without_conflicts_the_branch_is_rebased_without_the_agent() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.push_upstream("main", "other.md", "other\n");
+            let stdout = env.succeed(&["code", "sync"], &[]);
+            assert_eq!(stdout, "Rebased feature onto origin/main.\n");
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
+            assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
+        fn a_conflict_is_resolved_by_the_agent_and_the_rebase_finishes() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let stdout = env.succeed(&["code", "sync"], &[]);
+            assert_eq!(
+                stdout,
+                "Rebased feature onto origin/main, resolving conflicts in 1 commit.\n"
+            );
+            assert_eq!(env.git(&["branch", "--show-current"]), "feature");
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
+            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "Feature 0.");
+            assert_eq!(env.read("README.md"), "resolved 1\n");
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+            let prompt = env.logged("agent.1");
+            assert!(
+                prompt.contains("exactly these files: README.md."),
+                "{prompt}"
+            );
+        }
+
+        #[test]
+        fn each_conflicting_commit_is_resolved_in_turn() {
+            let env = Env::new();
+            env.feature(&["one\n", "two\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let stdout = env.succeed(&["code", "sync"], &[]);
+            assert!(
+                stdout.contains("resolving conflicts in 2 commits"),
+                "{stdout}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD~2"]), env.origin("main"));
+            assert_eq!(env.read("README.md"), "resolved 2\n");
+        }
+
+        #[test]
+        fn commits_that_become_empty_are_dropped_as_git_drops_them() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write("same.md", "same\n");
+            env.commit("Already upstream.");
+            env.write("README.md", "feature\n");
+            env.commit("Resolved away.");
+            env.write("kept.md", "kept\n");
+            env.commit("Kept.");
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            fs::write(clone.path().join("same.md"), "same\n").unwrap();
+            fs::write(clone.path().join("README.md"), "upstream\n").unwrap();
+            git(clone.path(), &["add", "--all"]);
+            git(
+                clone.path(),
+                &["commit", "--quiet", "--message", "Upstream."],
+            );
+            git(clone.path(), &["push", "--quiet", "origin", "main"]);
+            let ours = "git checkout --ours README.md && git add README.md";
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", ours)]);
+            assert_eq!(
+                env.git(&["log", "--format=%s", "origin/main..HEAD"]),
+                "Kept."
+            );
+            assert_eq!(env.read("README.md"), "upstream\n");
+            assert_eq!(env.agent_calls(), 1);
+        }
+
+        fn fails_and_puts_back(resolve: &str, expected: &str) -> Env {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(stderr.contains("so it was put back at"), "{stderr}");
+            assert!(stderr.contains(expected), "{stderr}");
+            env.assert_put_back(&tip);
+            env
+        }
+
+        #[test]
+        fn an_agent_that_creates_another_file_is_undone() {
+            let env = fails_and_puts_back(
+                "printf 'x\\n' > README.md && git add README.md && mkdir new && printf 'x\\n' > new/other.md",
+                "changed more than the staged resolution of the conflicted files (new/other.md)",
+            );
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+        }
+
+        #[test]
+        fn an_agent_that_creates_a_file_a_later_commit_adds_is_undone() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.write("later.md", "later\n");
+            let tip = env.commit("Later.");
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve =
+                "printf 'x\\n' > README.md && git add README.md && printf 'x\\n' > later.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(stderr.contains("so it was put back at"), "{stderr}");
+            assert!(stderr.contains("conflicted files (later.md)"), "{stderr}");
+            env.assert_put_back(&tip);
+            assert_eq!(env.read("later.md"), "later\n");
+        }
+
+        #[test]
+        fn an_agent_that_hides_a_change_to_another_file_is_undone() {
+            let env = Env::new();
+            env.write("other.md", "other\n");
+            env.commit("Other.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "printf 'x\\n' > README.md && git add README.md && \
+                 git update-index --skip-worktree other.md && printf 'x\\n' > other.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(stderr.contains("conflicted files (other.md)"), "{stderr}");
+            env.assert_put_back(&tip);
+            assert_eq!(env.read("other.md"), "other\n");
+            assert_eq!(env.git(&["ls-files", "-v", "other.md"]), "H other.md");
+        }
+
+        #[test]
+        fn an_agent_that_hides_the_resolution_is_undone() {
+            fails_and_puts_back(
+                "printf 'x\\n' > README.md && git add README.md && \
+                 git update-index --assume-unchanged README.md",
+                "conflicted files (README.md)",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_edits_the_rest_of_the_rebase_is_undone() {
+            let env = Env::new();
+            let tip = env.feature(&["one\n", "two\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "printf 'x\\n' > README.md && git add README.md && \
+                 : > \"$(git rev-parse --git-path rebase-merge/git-rebase-todo)\"";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(
+                stderr.contains("the agent changed the rebase itself"),
+                "{stderr}"
+            );
+            env.assert_put_back(&tip);
+        }
+
+        #[test]
+        fn an_agent_that_rewrites_the_commit_message_is_undone() {
+            fails_and_puts_back(
+                "printf 'x\\n' > README.md && git add README.md && \
+                 echo rewritten > \"$(git rev-parse --git-path rebase-merge/message)\"",
+                "the agent changed the rebase itself",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_edits_another_tracked_file_is_undone() {
+            let env = Env::new();
+            env.write("other.md", "other\n");
+            env.commit("Other.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve =
+                "printf 'x\\n' > README.md && git add README.md && printf 'x\\n' > other.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(stderr.contains("conflicted files (other.md)"), "{stderr}");
+            env.assert_put_back(&tip);
+            assert_eq!(env.read("other.md"), "other\n");
+        }
+
+        #[test]
+        fn an_agent_that_stages_another_file_is_undone() {
+            fails_and_puts_back(
+                "printf 'x\\n' > README.md && printf 'x\\n' > other.md && git add README.md other.md",
+                "(other.md)",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_continues_the_rebase_itself_is_undone() {
+            fails_and_puts_back(
+                "printf 'x\\n' > README.md && git add README.md && GIT_EDITOR=true git rebase --continue",
+                "the agent changed the rebase itself",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_leaves_markers_is_undone() {
+            fails_and_puts_back(
+                "git add README.md",
+                "the agent left conflict markers in README.md",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_leaves_unmerged_paths_is_undone() {
+            fails_and_puts_back("true", "the agent left unmerged paths (README.md)");
+        }
+
+        #[test]
+        fn markers_already_on_a_side_are_kept() {
+            let env = Env::new();
+            env.feature(&["feature\n=======\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let keep = "printf 'both\\n=======\\n' > README.md && git add README.md";
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", keep)]);
+            assert_eq!(env.read("README.md"), "both\n=======\n");
+        }
+
+        #[test]
+        fn a_dirty_working_tree_is_refused_before_fetching() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.write("untracked.md", "\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("has uncommitted changes or untracked files (untracked.md)"),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
+            assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
+        fn a_submodule_conflict_is_resolved_by_the_agent() {
+            let gitlink = |dir: &std::path::Path, id: char| {
+                let info = format!("160000,{},module", id.to_string().repeat(40));
+                git(dir, &["update-index", "--add", "--cacheinfo", &info]);
+                git(dir, &["commit", "--quiet", "--message", "Module."]);
+            };
+            let env = Env::new();
+            gitlink(env.work.path(), '1');
+            fs::create_dir(env.work.path().join("module")).unwrap();
+            env.git(&["push", "--quiet", "origin", "main"]);
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            gitlink(env.work.path(), '2');
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            gitlink(clone.path(), '3');
+            git(clone.path(), &["push", "--quiet", "origin", "main"]);
+            let resolve = format!(
+                "git update-index --cacheinfo 160000,{},module",
+                "4".repeat(40)
+            );
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert_eq!(env.git(&["rev-parse", "HEAD:module"]), "4".repeat(40));
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
+        }
+
+        #[test]
+        fn a_rebase_in_progress_is_refused() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.git(&["fetch", "--quiet"]);
+            let _ = std::process::Command::new("git")
+                .args(["-c", "user.name=ncli", "-c", "user.email=ncli@example.com"])
+                .args(["rebase", "--quiet", "origin/main"])
+                .current_dir(env.work.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(stderr.contains("a rebase is in progress"), "{stderr}");
+            assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
+        fn a_detached_head_is_refused() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--detach"]);
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(stderr.contains("not a branch to rebase"), "{stderr}");
+        }
+
+        #[test]
+        fn a_submodule_the_rebase_leaves_behind_does_not_count_against_the_agent() {
+            let env = Env::new();
+            let (_sub, _, two) = env.submodule();
+            env.feature(&["feature\n"]);
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            fs::write(clone.path().join("README.md"), "upstream\n").unwrap();
+            git(clone.path(), &["add", "README.md"]);
+            let info = format!("160000,{two},sub");
+            git(clone.path(), &["update-index", "--cacheinfo", &info]);
+            git(
+                clone.path(),
+                &["commit", "--quiet", "--message", "Upstream."],
+            );
+            git(clone.path(), &["push", "--quiet", "origin", "main"]);
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
+            assert_eq!(env.git(&["rev-parse", "HEAD:sub"]), two);
+        }
+
+        #[test]
+        fn a_submodule_the_agent_moves_is_put_back() {
+            let env = Env::new();
+            let (_sub, one, _) = env.submodule();
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "(cd sub && git checkout --quiet main) && \
+                 printf 'x\\n' > README.md && git add README.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(stderr.contains("conflicted files (sub)"), "{stderr}");
+            env.assert_put_back(&tip);
+            assert_eq!(
+                git(&env.work.path().join("sub"), &["rev-parse", "HEAD"]),
+                one
+            );
+        }
+
+        #[test]
+        fn from_needs_no_default_branch() {
+            let env = Env::new();
+            env.git(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+            env.feature(&["feature\n"]);
+            env.push_upstream("main", "other.md", "other\n");
+            let stdout = env.succeed(&["code", "sync", "--from", "main"], &[]);
+            assert_eq!(stdout, "Rebased feature onto origin/main.\n");
+        }
+
+        #[test]
+        fn from_rebases_onto_another_branch() {
+            let env = Env::new();
+            env.git(&["push", "--quiet", "origin", "main:release"]);
+            env.feature(&["feature\n"]);
+            env.push_upstream("release", "release.md", "release\n");
+            let stdout = env.succeed(&["code", "sync", "--from", "release"], &[]);
+            assert_eq!(stdout, "Rebased feature onto origin/release.\n");
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("release"));
+        }
+    }
+}

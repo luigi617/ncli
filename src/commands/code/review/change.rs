@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -7,11 +6,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::commands::code::git::{Git, Head, Index, RemoteBranch};
 use crate::error::Error;
-use crate::process::{self, Cancellation, Cli, ProcessError};
+use crate::process::{Cancellation, Cli, ProcessError};
 
-const PREFERRED_REMOTE: &str = "origin";
-const REMOTES: &str = "refs/remotes/";
 // Keeps the user's diff settings and drivers from hiding parts of the change.
 const DIFF: [&str; 4] = [
     "diff",
@@ -61,47 +59,7 @@ impl fmt::Display for Base {
     }
 }
 
-// Kept as the full ref, since a local branch can share a remote branch's short name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct RemoteBranch(String);
-
-impl fmt::Display for RemoteBranch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.strip_prefix(REMOTES).unwrap_or(&self.0))
-    }
-}
-
-struct Git<'a> {
-    cli: Cli,
-    cwd: &'a Path,
-    cancellation: &'a Cancellation,
-}
-
 impl Git<'_> {
-    fn run(&self, args: &[&str]) -> Result<String, ProcessError> {
-        self.run_with_input(args, None)
-    }
-
-    fn run_with_input(&self, args: &[&str], input: Option<&[u8]>) -> Result<String, ProcessError> {
-        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
-        let output = self
-            .cli
-            .run(&args, input, Some(self.cwd), self.cancellation)?;
-        Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
-    }
-
-    fn head(&self) -> Result<Head, ProcessError> {
-        let optional = |args: &[&str]| match self.run(args) {
-            Err(ProcessError::Exit { code: 1, .. }) => Ok(None),
-            found => found.map(Some),
-        };
-        Ok(Head {
-            branch: optional(&["symbolic-ref", "--quiet", "HEAD"])?,
-            commit: optional(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?,
-        })
-    }
-
     fn empty_tree(&self) -> Result<String, ProcessError> {
         self.run_with_input(&["hash-object", "-t", "tree", "--stdin"], Some(b""))
     }
@@ -161,17 +119,6 @@ impl Git<'_> {
         Ok((snapshot, index))
     }
 
-    fn index(&self) -> Result<Index, ProcessError> {
-        let entries = self.run(&["ls-files", "--stage", "-z"])?;
-        Ok(Index(
-            entries
-                .split('\0')
-                .filter_map(|entry| entry.split_once('\t'))
-                .map(|(entry, path)| (path.to_owned(), entry.to_owned()))
-                .collect(),
-        ))
-    }
-
     fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {
         let args = [&DIFF[..], &["--no-renames", "--name-only", "-z"], diff].concat();
         self.run(&args)
@@ -180,27 +127,17 @@ impl Git<'_> {
     // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
     // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
     fn hidden_edits(&self) -> Result<Vec<String>, ProcessError> {
-        let files = self.run(&["ls-files", "-v", "-z"])?;
-        let marked: HashSet<&str> = files
-            .split('\0')
-            .filter_map(|entry| entry.split_once(' '))
-            .filter(|&(tag, path)| match tag {
-                "S" | "s" => self.cwd.join(path).symlink_metadata().is_ok(),
-                tag => tag.bytes().all(|byte| byte.is_ascii_lowercase()),
-            })
-            .map(|(_, path)| path)
+        let index = self.index()?;
+        let marked: HashSet<&str> = index
+            .hidden()
+            .into_iter()
+            .filter(|&(path, skip)| !skip || self.cwd.join(path).symlink_metadata().is_ok())
+            .map(|(path, _)| path)
             .collect();
         if marked.is_empty() {
             return Ok(Vec::new());
         }
-        let paths: String = marked.iter().map(|path| format!("{path}\0")).collect();
-        // With --stdin, update-index applies only one of several flags, so each bit has its own call.
-        for flag in ["--no-assume-unchanged", "--no-skip-worktree"] {
-            self.run_with_input(
-                &["update-index", flag, "-z", "--stdin"],
-                Some(paths.as_bytes()),
-            )?;
-        }
+        self.unhide(marked.iter().copied())?;
         let modified = self.changed_paths(&[])?;
         Ok(modified
             .split('\0')
@@ -248,43 +185,6 @@ impl Git<'_> {
         }
         Ok(dirty)
     }
-
-    fn default_branch(&self) -> Result<RemoteBranch, Error> {
-        let output = self.run(&["for-each-ref", "--format=%(refname) %(symref)", REMOTES])?;
-        let mut heads: Vec<(&str, RemoteBranch)> = output
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .filter(|(name, target)| name.ends_with("/HEAD") && !target.is_empty())
-            .map(|(name, target)| (name, RemoteBranch(target.to_owned())))
-            .collect();
-        let preferred = format!("{REMOTES}{PREFERRED_REMOTE}/HEAD");
-        match heads.len() {
-            0 => Err(Error::NoDefaultBranch),
-            1 => Ok(heads.remove(0).1),
-            _ => match heads.iter().position(|(name, _)| *name == preferred) {
-                Some(index) => Ok(heads.swap_remove(index).1),
-                None => Err(Error::AmbiguousDefaultBranch {
-                    branches: heads
-                        .iter()
-                        .map(|(_, branch)| branch.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    preferred: PREFERRED_REMOTE,
-                }),
-            },
-        }
-    }
-}
-
-struct Index(HashSet<(String, String)>);
-
-impl Index {
-    fn changed_paths<'a>(&'a self, other: &'a Self) -> HashSet<&'a str> {
-        self.0
-            .symmetric_difference(&other.0)
-            .map(|(path, _)| path.as_str())
-            .collect()
-    }
 }
 
 // Git distrusts cached stat data newer than the index file, so the copy keeps the original mtime.
@@ -298,27 +198,6 @@ fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
         .write(true)
         .open(to)?
         .set_modified(modified)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Head {
-    branch: Option<String>,
-    commit: Option<String>,
-}
-
-impl fmt::Display for Head {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let branch = self
-            .branch
-            .as_deref()
-            .map(|branch| branch.strip_prefix("refs/heads/").unwrap_or(branch));
-        match (branch, &self.commit) {
-            (Some(branch), Some(commit)) => write!(f, "{branch} at {commit}"),
-            (Some(branch), None) => write!(f, "{branch} with no commits"),
-            (None, Some(commit)) => write!(f, "a detached HEAD at {commit}"),
-            (None, None) => f.write_str("no commit"),
-        }
-    }
 }
 
 pub struct Worktree {
@@ -348,17 +227,8 @@ impl Worktree {
     }
 
     fn take(earlier: Option<&Self>, cancellation: &Cancellation) -> Result<Self, Error> {
-        let git = Git {
-            cli: Cli::new(["git"]),
-            cwd: Path::new("."),
-            cancellation,
-        };
-        process::require_executables([git.cli.executable()])?;
-        let repo = match git.run(&["rev-parse", "--show-toplevel"]) {
-            Err(error @ ProcessError::Exit { .. }) => return Err(Error::NotAWorkTree(error)),
-            repo => PathBuf::from(repo?),
-        };
-        let git = Git { cwd: &repo, ..git };
+        let repo = Git::toplevel(cancellation)?;
+        let git = Git::new(&repo, cancellation);
         let head = git.head()?;
         let committed = match &head.commit {
             Some(head) => head.clone(),
@@ -400,11 +270,7 @@ impl Change {
             Error::NotAWorkTree(source) => Error::NoLocalChange(source),
             error => error,
         })?;
-        let git = Git {
-            cli: Cli::new(["git"]),
-            cwd: &repo,
-            cancellation,
-        };
+        let git = Git::new(&repo, cancellation);
         if tree != git.run(&["rev-parse", &format!("{}^{{tree}}", base.id())])? {
             return Ok(Self::Uncommitted {
                 repo,
@@ -416,11 +282,8 @@ impl Change {
             return Err(Error::NoCommits(repo));
         };
         let base = git.default_branch()?;
-        let merge_base = match git.run(&["merge-base", &base.0, &head]) {
-            Err(ProcessError::Exit { code: 1, .. }) => {
-                return Err(Error::NoCommonHistory { repo, base });
-            }
-            merge_base => merge_base?,
+        let Some(merge_base) = git.optional(&["merge-base", &base.0, &head])? else {
+            return Err(Error::NoCommonHistory { repo, base });
         };
         if merge_base == head {
             return Err(Error::NoChanges { repo, base });

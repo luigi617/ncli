@@ -1,13 +1,18 @@
 mod fix;
+pub(crate) mod git;
 mod implement;
 mod publish_comment;
 pub mod review;
+mod ship;
+mod sync;
 
 use clap::Subcommand;
 
 pub use fix::Fix;
 pub use implement::Implement;
 pub use publish_comment::PublishComment;
+pub use ship::{Ship, Unusable};
+pub use sync::{Sync, Unresolved};
 
 use super::{Context, Output};
 use crate::error::Error;
@@ -19,6 +24,8 @@ pub enum CodeCommand {
     PublishComment(PublishComment),
     Fix(Fix),
     Implement(Implement),
+    Ship(Ship),
+    Sync(Sync),
 }
 
 impl CodeCommand {
@@ -31,6 +38,8 @@ impl CodeCommand {
             }),
             Self::Fix(fix) => fix.run(context).map(Output::from),
             Self::Implement(implement) => implement.run(context),
+            Self::Ship(ship) => ship.run(context).map(Output::from),
+            Self::Sync(sync) => sync.run(context).map(Output::from),
         }
     }
 }

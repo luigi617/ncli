@@ -1,0 +1,6 @@
+{
+  "branch": { "type": "string" },
+  "commit_message": { "type": "string" },
+  "title": { "type": "string" },
+  "body": { "type": "string" }
+}
