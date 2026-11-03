@@ -161,11 +161,13 @@ impl Rebase<'_> {
         Ok((!marked.is_empty()).then(|| Unsynced::Markers(marked.join(", "))))
     }
 
-    // The branch's commits with a changed path that no rebased commit of the same identity changes
-    // and where picking the commit onto HEAD would change HEAD. A path whose change is already on
-    // HEAD, or a commit whose patch is on the target, may be skipped. Commits that share an
-    // identity have all their paths checked when fewer were replayed, since which of them was
-    // skipped is unknown.
+    // The branch's commits with a change missing from the branch. A path that no rebased commit of
+    // the same identity changes is missing when picking the commit onto HEAD would change it, so a
+    // change already on HEAD, or a commit whose patch is on the target, may be skipped. A path the
+    // rebased commit changes is missing a hunk when picking the commit onto the rebased commit, with
+    // conflicts left as the rebased commit resolved them, would change it. Commits that share an
+    // identity are paired in order; when their counts differ, which of them is which is unknown and
+    // all their paths are checked against HEAD.
     fn dropped(&self) -> Result<Vec<String>, ProcessError> {
         let log = |tip: &str| {
             self.git.run(&[
@@ -183,11 +185,9 @@ impl Rebase<'_> {
                 .map(|(commit, identity)| (commit.to_owned(), identity.to_owned()))
                 .collect()
         };
-        let mut rebased: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        let mut rebased: HashMap<String, Vec<String>> = HashMap::new();
         for (commit, identity) in entries(&log("HEAD")?) {
-            let (count, paths) = rebased.entry(identity).or_default();
-            *count += 1;
-            paths.extend(self.paths(&commit)?);
+            rebased.entry(identity).or_default().push(commit);
         }
         let cherry = self.git.run(&["cherry", self.onto, self.old])?;
         let upstream: HashSet<&str> = cherry
@@ -202,15 +202,34 @@ impl Rebase<'_> {
         for (_, identity) in &original {
             *originals.entry(identity).or_default() += 1;
         }
+        let mut seen: HashMap<&str, usize> = HashMap::new();
         let mut dropped = Vec::new();
         for (commit, identity) in &original {
-            let mut missing = self.paths(commit)?;
-            if let Some((count, paths)) = rebased.get(identity)
-                && *count >= originals[identity.as_str()]
+            let index = seen.entry(identity).or_default();
+            let counterpart = rebased
+                .get(identity)
+                .filter(|commits| commits.len() == originals[identity.as_str()])
+                .map(|commits| commits[*index].as_str());
+            *index += 1;
+            let paths = self.paths(commit)?;
+            let (kept, missing): (Vec<String>, Vec<String>) = match counterpart {
+                Some(counterpart) => {
+                    let changed: HashSet<String> = self.paths(counterpart)?.into_iter().collect();
+                    paths.into_iter().partition(|path| changed.contains(path))
+                }
+                None => (Vec::new(), paths),
+            };
+            let lost =
+                |onto: &str, paths: &[String], resolved: bool| -> Result<bool, ProcessError> {
+                    if paths.is_empty() {
+                        return Ok(false);
+                    }
+                    let changed = self.changed_by_pick(commit, onto, resolved)?;
+                    Ok(paths.iter().any(|path| changed.contains(path)))
+                };
+            if lost("HEAD", &missing, false)?
+                || counterpart.map_or(Ok(false), |onto| lost(onto, &kept, true))?
             {
-                missing.retain(|path| !paths.contains(path));
-            }
-            if !missing.is_empty() && !self.on_head(commit, &missing)? {
                 dropped.push(commit.clone());
             }
         }
@@ -229,28 +248,46 @@ impl Rebase<'_> {
         Ok(paths.split_terminator('\0').map(str::to_owned).collect())
     }
 
-    // Whether picking the commit onto HEAD leaves the paths as HEAD has them. A conflicted pick
-    // still writes a tree, with markers in the conflicted files.
-    fn on_head(&self, commit: &str, paths: &[String]) -> Result<bool, ProcessError> {
-        let picked = match self.git.run(&[
+    // The paths that picking the commit onto `onto` would change. A conflicted pick still writes a
+    // tree, with markers in the conflicted files. When `resolved`, conflicting hunks take `onto`'s
+    // side, and files with a conflict no hunk can settle, such as a modify/delete, count as left
+    // as `onto` has them.
+    fn changed_by_pick(
+        &self,
+        commit: &str,
+        onto: &str,
+        resolved: bool,
+    ) -> Result<HashSet<String>, ProcessError> {
+        let merge_base = format!("--merge-base={commit}^");
+        let mut args = vec![
             "merge-tree",
             "--write-tree",
             "--no-messages",
-            &format!("--merge-base={commit}^"),
-            "HEAD",
-            commit,
-        ]) {
+            "--name-only",
+            "-z",
+            merge_base.as_str(),
+        ];
+        if resolved {
+            args.push("--strategy-option=ours");
+        }
+        args.extend([onto, commit]);
+        let picked = match self.git.run(&args) {
             Err(ProcessError::Exit {
                 code: 1, stdout, ..
             }) => stdout,
             picked => picked?,
         };
-        let tree = picked.lines().next().unwrap_or_default();
+        let mut entries = picked.split('\0');
+        let tree = entries.next().unwrap_or_default();
+        let conflicted: HashSet<&str> = entries.take_while(|path| !path.is_empty()).collect();
         let changed = self
             .git
-            .run(&["diff-tree", "-r", "-z", "--name-only", "HEAD", tree])?;
-        let changed: HashSet<&str> = changed.split_terminator('\0').collect();
-        Ok(paths.iter().all(|path| !changed.contains(path.as_str())))
+            .run(&["diff-tree", "-r", "-z", "--name-only", onto, tree])?;
+        Ok(changed
+            .split_terminator('\0')
+            .filter(|path| !(resolved && conflicted.contains(path)))
+            .map(str::to_owned)
+            .collect())
     }
 
     // The files with a line starting with a conflict marker that neither the branch nor the target

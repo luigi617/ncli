@@ -931,4 +931,36 @@ esac
             )
         );
     }
+
+    #[test]
+    fn a_branch_review_saved_with_the_base_as_a_full_ref_still_loads() {
+        let repo = repo();
+        let (_, head) = feature_branch(repo.path());
+        let dir = TempDir::new().unwrap();
+        install_reviewers(
+            dir.path(),
+            &[("claude", FAKE_REVIEWER), ("codex", FAKE_REVIEWER)],
+        );
+        assert!(review_locally(dir.path(), repo.path()).status.success());
+        let saved = dir.path().join("state").join("review.json");
+        let review = fs::read_to_string(&saved).unwrap();
+        let parts = r#"{"remote":"origin","branch":"main"}"#;
+        assert!(review.contains(parts), "{review}");
+        fs::write(
+            &saved,
+            review.replace(parts, r#""refs/remotes/origin/main""#),
+        )
+        .unwrap();
+        let publish = in_path(dir.path(), &["code", "publish-comment"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(publish.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!(
+                "the last review was of the commits up to {head} since it branched from \
+                 origin/main in "
+            )),
+            "{stderr}"
+        );
+    }
 }

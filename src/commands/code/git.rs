@@ -11,9 +11,33 @@ const PREFERRED_REMOTE: &str = "origin";
 const REMOTES: &str = "refs/remotes/";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredRemoteBranch")]
 pub struct RemoteBranch {
     pub(super) remote: String,
     pub(super) branch: String,
+}
+
+// Earlier versions saved the full ref. Its split is a guess when the remote's name holds a `/`,
+// but the ref it names is the same.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRemoteBranch {
+    Parts { remote: String, branch: String },
+    Ref(String),
+}
+
+impl From<StoredRemoteBranch> for RemoteBranch {
+    fn from(stored: StoredRemoteBranch) -> Self {
+        let (remote, branch) = match stored {
+            StoredRemoteBranch::Parts { remote, branch } => (remote, branch),
+            StoredRemoteBranch::Ref(refname) => {
+                let name = refname.strip_prefix(REMOTES).unwrap_or(&refname);
+                let (remote, branch) = name.split_once('/').unwrap_or((name, ""));
+                (remote.to_owned(), branch.to_owned())
+            }
+        };
+        Self { remote, branch }
+    }
 }
 
 impl RemoteBranch {

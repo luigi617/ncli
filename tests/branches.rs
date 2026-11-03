@@ -1150,6 +1150,67 @@ esac
             assert_restored(&env, &old);
         }
 
+        fn lines(edits: &[(usize, &str)]) -> String {
+            (1..=10)
+                .map(|n| {
+                    let line = edits.iter().find(|(at, _)| *at == n).map(|(_, line)| *line);
+                    format!("{}\n", line.map_or(n.to_string(), str::to_owned))
+                })
+                .collect()
+        }
+
+        // A branch whose commit edits lines 1, 5 and 10 of lines.txt, and main edits line 1.
+        fn conflicting_in_one_hunk(env: &Env) -> String {
+            env.write("lines.txt", &lines(&[]));
+            env.commit("Lines.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let old = feature(
+                env,
+                "lines.txt",
+                &lines(&[(1, "feature"), (5, "five"), (10, "ten")]),
+            );
+            env.push_upstream("main", "lines.txt", &lines(&[(1, "upstream")]));
+            old
+        }
+
+        fn resolve_lines(edits: &[(usize, &str)]) -> String {
+            format!(
+                "printf '{}' > lines.txt && git add lines.txt && git commit --quiet --no-edit \
+                 --no-verify -C REBASE_HEAD && GIT_EDITOR=: git rebase --continue",
+                lines(edits).replace('\n', "\\n")
+            )
+        }
+
+        #[test]
+        fn a_hunk_the_agent_drops_from_a_kept_file_puts_the_branch_back() {
+            let env = Env::new();
+            let old = conflicting_in_one_hunk(&env);
+            let resolve = resolve_lines(&[(1, "both"), (5, "five")]);
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert_unfinished(
+                &stderr,
+                &format!("the changes of {old} are no longer on the branch"),
+            );
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_conflict_resolved_either_way_keeps_the_other_hunks_even_when_reverted_later() {
+            for line in ["both", "upstream", "feature"] {
+                let env = Env::new();
+                conflicting_in_one_hunk(&env);
+                env.write("lines.txt", &lines(&[(1, "feature"), (10, "ten")]));
+                env.commit("Revert five.");
+                let resolve = resolve_lines(&[(1, line), (5, "five"), (10, "ten")]);
+                env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+                assert_eq!(
+                    env.git(&["show", "HEAD:lines.txt"]),
+                    lines(&[(1, line), (10, "ten")]).trim_end()
+                );
+                assert!(!env.rebasing());
+            }
+        }
+
         #[test]
         fn a_kept_commit_may_leave_out_a_change_already_upstream() {
             let env = Env::new();
