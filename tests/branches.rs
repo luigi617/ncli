@@ -1054,6 +1054,66 @@ esac
         }
 
         #[test]
+        fn a_skipped_commit_is_found_when_a_kept_commit_shares_its_identity() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            let date = "--date=2000-01-01T00:00:00Z";
+            env.write("a.txt", "a\n");
+            env.git(&["add", "--all"]);
+            env.git(&["commit", "--quiet", date, "--message", "wip"]);
+            env.write("README.md", "feature\n");
+            env.git(&["add", "--all"]);
+            env.git(&["commit", "--quiet", date, "--message", "wip"]);
+            let old = env.git(&["rev-parse", "HEAD"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let skip = ("FAKE_RESOLVE", "git rebase --skip");
+            let stderr = env.fail(&["code", "sync"], &[skip]);
+            assert_unfinished(
+                &stderr,
+                &format!("the changes of {old} are no longer on the branch"),
+            );
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_branch_with_merge_commits_is_rejected_up_front() {
+            let env = Env::new();
+            feature(&env, "feature.rs", "fn f() {}\n");
+            env.git(&["switch", "--quiet", "--create", "side", "main"]);
+            env.write("side.txt", "side\n");
+            env.commit("Side.");
+            env.git(&["switch", "--quiet", "feature"]);
+            env.git(&["merge", "--quiet", "--no-commit", "side"]);
+            env.write("merge-only", "merge\n");
+            let old = env.commit("Merge.");
+            env.push_upstream("main", "README.md", "upstream\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains(&format!(
+                    "cannot sync feature: its merge commits since origin/main ({old}) would be \
+                     flattened by a rebase"
+                )),
+                "{stderr}"
+            );
+            assert_eq!(env.count("resolve"), 0);
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn marker_like_lines_already_in_a_file_the_branch_changes_are_allowed() {
+            let env = Env::new();
+            env.write("fixture.txt", "<<<<<<< ours\n");
+            env.commit("Fixture.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            feature(&env, "README.md", "feature\n");
+            env.write("fixture.txt", "<<<<<<< ours\nmore\n");
+            env.commit("More.");
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.succeed(&["code", "sync"], &[]);
+            assert!(!env.rebasing());
+        }
+
+        #[test]
         fn a_commit_git_drops_because_its_change_is_already_upstream_is_allowed() {
             let env = Env::new();
             feature(&env, "same.txt", "same\n");

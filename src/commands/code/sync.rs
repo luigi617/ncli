@@ -73,6 +73,18 @@ impl Sync {
         let agent = AgentKind::first_available()?;
         context.progress(&format!("fetching {from}"));
         git.fetch(&from)?;
+        let merges = git.run(&[
+            "rev-list",
+            "--merges",
+            &format!("{}..{old}", from.refname()),
+        ])?;
+        if !merges.is_empty() {
+            return Err(Error::MergeCommits {
+                branch: branch.to_owned(),
+                from: Box::new(from),
+                commits: merges.lines().collect::<Vec<_>>().join(", "),
+            });
+        }
         context.progress(&format!("rebasing {branch} onto {from}"));
         let rebase = Rebase {
             git: &git,
@@ -154,7 +166,8 @@ impl Rebase<'_> {
 
     // The branch's commits that were not replayed and whose changes HEAD lacks, since picking them
     // onto HEAD would change it. A commit whose change is already on HEAD, or whose patch is on the
-    // target, may be skipped.
+    // target, may be skipped. Commits that share an identity are all checked when fewer were
+    // replayed, since which of them was skipped is unknown.
     fn dropped(&self) -> Result<Vec<String>, ProcessError> {
         let log = |format: &str, tip: &str| {
             self.git.run(&[
@@ -177,17 +190,19 @@ impl Rebase<'_> {
             .lines()
             .filter_map(|line| line.strip_prefix("- "))
             .collect();
-        let head = self.git.run(&["rev-parse", "HEAD^{tree}"])?;
-        let mut dropped = Vec::new();
-        for (commit, identity) in original
+        let original: Vec<(&str, &str)> = original
             .split_terminator('\0')
             .filter_map(|entry| entry.split_once('\n'))
-        {
-            if let Some(count) = rebased.get_mut(identity).filter(|count| **count > 0) {
-                *count -= 1;
-                continue;
-            }
-            if upstream.contains(commit) {
+            .filter(|(commit, _)| !upstream.contains(commit))
+            .collect();
+        let mut originals: HashMap<&str, usize> = HashMap::new();
+        for (_, identity) in &original {
+            *originals.entry(identity).or_default() += 1;
+        }
+        let head = self.git.run(&["rev-parse", "HEAD^{tree}"])?;
+        let mut dropped = Vec::new();
+        for (commit, identity) in original {
+            if rebased.get(identity).copied().unwrap_or_default() >= originals[identity] {
                 continue;
             }
             let picked = self.git.optional(&[
@@ -205,15 +220,17 @@ impl Rebase<'_> {
         Ok(dropped)
     }
 
-    // The files the branch changes that have a line starting with a conflict marker.
+    // The files the branch changes that have a line starting with a conflict marker that neither
+    // the branch nor the target had in that file.
     fn marked(&self) -> Result<Vec<String>, ProcessError> {
+        let target = self.from.refname();
         let changed = self.git.run(&[
             "diff",
             "--name-only",
             "-z",
             "--no-renames",
             "--diff-filter=d",
-            &self.from.refname(),
+            &target,
             "HEAD",
         ])?;
         if changed.is_empty() {
@@ -223,14 +240,42 @@ impl Rebase<'_> {
         // Not limited to the changed paths, which can be too many to pass as arguments.
         let found = self
             .git
-            .optional(&["grep", "-I", "-l", "-z", "-E", "-e", MARKERS, "HEAD"])?
+            .optional(&[
+                "grep", "-I", "-z", "-E", "-e", MARKERS, "HEAD", &target, self.old,
+            ])?
             .unwrap_or_default();
-        Ok(found
-            .split_terminator('\0')
-            .map(|found| found.strip_prefix("HEAD:").unwrap_or(found))
-            .filter(|path| changed.contains(path))
-            .map(str::to_owned)
-            .collect())
+        // Each match is `<rev>:<path>\0<line>\n`; a path may hold a newline but a line cannot.
+        let mut chunks = found.split('\0');
+        let mut location = chunks.next().unwrap_or_default();
+        let mut lines = Vec::new();
+        for chunk in chunks {
+            let (line, next) = chunk.split_once('\n').unwrap_or((chunk, ""));
+            lines.push((location, line));
+            location = next;
+        }
+        let prefixes = [format!("{target}:"), format!("{}:", self.old)];
+        let before: HashSet<(&str, &str)> = lines
+            .iter()
+            .filter_map(|(location, line)| {
+                let path = prefixes
+                    .iter()
+                    .find_map(|prefix| location.strip_prefix(prefix.as_str()))?;
+                Some((path, *line))
+            })
+            .collect();
+        let mut marked: Vec<String> = Vec::new();
+        for (location, line) in lines {
+            let Some(path) = location.strip_prefix("HEAD:") else {
+                continue;
+            };
+            if changed.contains(path)
+                && !before.contains(&(path, line))
+                && marked.last().is_none_or(|last| last != path)
+            {
+                marked.push(path.to_owned());
+            }
+        }
+        Ok(marked)
     }
 
     // Not cancellable: an interrupted run still puts the branch back where it was.

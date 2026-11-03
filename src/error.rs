@@ -156,6 +156,14 @@ pub enum Error {
     #[error("cannot sync {head} in {}; switch to a branch with commits first", .repo.display())]
     NotOnABranch { repo: PathBuf, head: Box<Head> },
     #[error(
+        "cannot sync {branch}: its merge commits since {from} ({commits}) would be flattened by a rebase, losing the changes made in them; rebase it by hand"
+    )]
+    MergeCommits {
+        branch: String,
+        from: Box<RemoteBranch>,
+        commits: String,
+    },
+    #[error(
         "the working tree in {} has uncommitted changes ({paths}); commit or stash them first", .repo.display()
     )]
     DirtyWorktree { repo: PathBuf, paths: String },
@@ -296,6 +304,7 @@ impl Error {
             | Self::OperationInProgress { .. }
             | Self::UnmergedPaths { .. }
             | Self::NotOnABranch { .. }
+            | Self::MergeCommits { .. }
             | Self::DirtyWorktree { .. }
             | Self::Unsynced { .. }
             | Self::NothingWritten(_)
