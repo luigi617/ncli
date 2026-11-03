@@ -161,60 +161,96 @@ impl Rebase<'_> {
         Ok((!marked.is_empty()).then(|| Unsynced::Markers(marked.join(", "))))
     }
 
-    // The branch's commits that were not replayed and whose changes HEAD lacks, since picking them
-    // onto HEAD would change it. A commit whose change is already on HEAD, or whose patch is on the
-    // target, may be skipped. Commits that share an identity are all checked when fewer were
-    // replayed, since which of them was skipped is unknown.
+    // The branch's commits with a changed path that no rebased commit of the same identity changes
+    // and where picking the commit onto HEAD would change HEAD. A path whose change is already on
+    // HEAD, or a commit whose patch is on the target, may be skipped. Commits that share an
+    // identity have all their paths checked when fewer were replayed, since which of them was
+    // skipped is unknown.
     fn dropped(&self) -> Result<Vec<String>, ProcessError> {
-        let log = |format: &str, tip: &str| {
+        let log = |tip: &str| {
             self.git.run(&[
                 "log",
                 "--no-merges",
                 "-z",
                 "--date=raw",
-                &format!("--format={format}"),
+                &format!("--format=%H%n{IDENTITY}"),
                 &format!("{}..{tip}", self.onto),
             ])
         };
-        let replayed = log(IDENTITY, "HEAD")?;
-        let mut rebased: HashMap<&str, usize> = HashMap::new();
-        for identity in replayed.split_terminator('\0') {
-            *rebased.entry(identity).or_default() += 1;
+        let entries = |log: &str| -> Vec<(String, String)> {
+            log.split_terminator('\0')
+                .filter_map(|entry| entry.split_once('\n'))
+                .map(|(commit, identity)| (commit.to_owned(), identity.to_owned()))
+                .collect()
+        };
+        let mut rebased: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
+        for (commit, identity) in entries(&log("HEAD")?) {
+            let (count, paths) = rebased.entry(identity).or_default();
+            *count += 1;
+            paths.extend(self.paths(&commit)?);
         }
-        let original = log(&format!("%H%n{IDENTITY}"), self.old)?;
         let cherry = self.git.run(&["cherry", self.onto, self.old])?;
         let upstream: HashSet<&str> = cherry
             .lines()
             .filter_map(|line| line.strip_prefix("- "))
             .collect();
-        let original: Vec<(&str, &str)> = original
-            .split_terminator('\0')
-            .filter_map(|entry| entry.split_once('\n'))
-            .filter(|(commit, _)| !upstream.contains(commit))
+        let original: Vec<(String, String)> = entries(&log(self.old)?)
+            .into_iter()
+            .filter(|(commit, _)| !upstream.contains(commit.as_str()))
             .collect();
         let mut originals: HashMap<&str, usize> = HashMap::new();
         for (_, identity) in &original {
             *originals.entry(identity).or_default() += 1;
         }
-        let head = self.git.run(&["rev-parse", "HEAD^{tree}"])?;
         let mut dropped = Vec::new();
-        for (commit, identity) in original {
-            if rebased.get(identity).copied().unwrap_or_default() >= originals[identity] {
-                continue;
+        for (commit, identity) in &original {
+            let mut missing = self.paths(commit)?;
+            if let Some((count, paths)) = rebased.get(identity)
+                && *count >= originals[identity.as_str()]
+            {
+                missing.retain(|path| !paths.contains(path));
             }
-            let picked = self.git.optional(&[
-                "merge-tree",
-                "--write-tree",
-                "--no-messages",
-                &format!("--merge-base={commit}^"),
-                "HEAD",
-                commit,
-            ])?;
-            if picked.as_deref() != Some(head.as_str()) {
-                dropped.push(commit.to_owned());
+            if !missing.is_empty() && !self.on_head(commit, &missing)? {
+                dropped.push(commit.clone());
             }
         }
         Ok(dropped)
+    }
+
+    fn paths(&self, commit: &str) -> Result<Vec<String>, ProcessError> {
+        let paths = self.git.run(&[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            commit,
+        ])?;
+        Ok(paths.split_terminator('\0').map(str::to_owned).collect())
+    }
+
+    // Whether picking the commit onto HEAD leaves the paths as HEAD has them. A conflicted pick
+    // still writes a tree, with markers in the conflicted files.
+    fn on_head(&self, commit: &str, paths: &[String]) -> Result<bool, ProcessError> {
+        let picked = match self.git.run(&[
+            "merge-tree",
+            "--write-tree",
+            "--no-messages",
+            &format!("--merge-base={commit}^"),
+            "HEAD",
+            commit,
+        ]) {
+            Err(ProcessError::Exit {
+                code: 1, stdout, ..
+            }) => stdout,
+            picked => picked?,
+        };
+        let tree = picked.lines().next().unwrap_or_default();
+        let changed = self
+            .git
+            .run(&["diff-tree", "-r", "-z", "--name-only", "HEAD", tree])?;
+        let changed: HashSet<&str> = changed.split_terminator('\0').collect();
+        Ok(paths.iter().all(|path| !changed.contains(path.as_str())))
     }
 
     // The files with a line starting with a conflict marker that neither the branch nor the target

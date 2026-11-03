@@ -1120,6 +1120,52 @@ esac
             assert_restored(&env, &old);
         }
 
+        const THEIRS: &str = "git checkout --ours README.md && git add README.md && \
+            git commit --quiet --allow-empty --no-edit --no-verify -C REBASE_HEAD && \
+            GIT_EDITOR=: git rebase --continue";
+
+        #[test]
+        fn a_commit_the_agent_empties_puts_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", THEIRS)]);
+            assert_unfinished(
+                &stderr,
+                &format!("the changes of {old} are no longer on the branch"),
+            );
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_change_the_agent_drops_from_a_kept_commit_puts_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let resolve =
+                format!("echo unrelated > unrelated.txt && git add unrelated.txt && {THEIRS}");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert_unfinished(
+                &stderr,
+                &format!("the changes of {old} are no longer on the branch"),
+            );
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_kept_commit_may_leave_out_a_change_already_upstream() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write("README.md", "feature\n");
+            env.write("same.txt", "same\n");
+            env.commit("Feature.");
+            env.change_upstream("main", |clone| {
+                fs::write(clone.join("same.txt"), "same\n").unwrap();
+                fs::write(clone.join("README.md"), "upstream\n").unwrap();
+            });
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "Feature.");
+            assert!(!env.rebasing());
+        }
+
         #[test]
         fn a_branch_with_merge_commits_is_rejected_up_front() {
             let env = Env::new();
