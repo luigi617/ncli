@@ -121,7 +121,9 @@ pub enum Error {
         problem: Box<Unshipped>,
         report: String,
     },
-    #[error("gh described the pull request in an unexpected format: {0}")]
+    #[error("{0} does not name a GitHub repository")]
+    NotAGitHubRemote(String),
+    #[error("gh described the repository or pull request in an unexpected format: {0}")]
     GhOutput(#[source] serde_json::Error),
     #[error("{agent} left no changes in {} to fix the check: {}", .repo.display(), .report.trim())]
     NothingFixed {
@@ -286,6 +288,7 @@ impl Error {
             | Self::Unsettled { .. }
             | Self::NothingToShip { .. }
             | Self::Unshipped { .. }
+            | Self::NotAGitHubRemote(_)
             | Self::GhOutput(_)
             | Self::NothingFixed { .. }
             | Self::StillFailing { .. }

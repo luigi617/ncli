@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::sync::LazyLock;
 
 use clap::Args;
@@ -10,7 +10,7 @@ use super::review::{Change, Worktree};
 use crate::agent::{AgentKind, task_schema};
 use crate::commands::Context;
 use crate::error::Error;
-use crate::process::{self, Cli};
+use crate::process::{self, Cli, ProcessError};
 
 const GH: &str = "gh";
 
@@ -31,6 +31,12 @@ pub enum Unshipped {
     Dirty(String),
     #[error("HEAD is {0}, which is not a branch to open a pull request from")]
     Unbranched(Box<Head>),
+    #[error("the shipped branch no longer contains {0}, the commit it started from")]
+    Dropped(String),
+    #[error("the shipped commit has tree {found}, not {expected}, the work there was to ship")]
+    Altered { expected: String, found: String },
+    #[error("the pull request at {url} is not from and into {repository}")]
+    Elsewhere { url: String, repository: String },
     #[error("the pull request at {url} has {field} {found}, not {expected}")]
     Mismatch {
         url: String,
@@ -54,10 +60,17 @@ struct PullRequest {
     base_ref_name: String,
     head_ref_name: String,
     head_ref_oid: String,
+    is_cross_repository: bool,
+}
+
+#[derive(Deserialize)]
+struct Repository {
+    url: String,
 }
 
 struct Target<'a> {
     into: &'a RemoteBranch,
+    repository: &'a str,
     default: Option<&'a str>,
 }
 
@@ -104,9 +117,11 @@ impl Ship {
                 base: into,
             });
         }
+        let repository = repository(&git, &into.remote)?;
         let default = git.remote_default(&into.remote)?;
         let target = Target {
             into: &into,
+            repository: &repository,
             default: default.as_deref(),
         };
         context.progress(&format!("shipping to {into}"));
@@ -115,7 +130,7 @@ impl Ship {
             &SCHEMA,
             cancellation,
         )?;
-        let unshipped = unshipped(&git, &target, &shipment.url)
+        let unshipped = unshipped(&git, &worktree, head, &target, &shipment.url)
             .map_err(|error| error.resumable(&step.resume))?;
         match unshipped {
             Some(problem) => Err(Error::Unshipped {
@@ -130,7 +145,13 @@ impl Ship {
     }
 }
 
-fn unshipped(git: &Git, target: &Target, url: &str) -> Result<Option<Unshipped>, Error> {
+fn unshipped(
+    git: &Git,
+    worktree: &Worktree,
+    start: &str,
+    target: &Target,
+    url: &str,
+) -> Result<Option<Unshipped>, Error> {
     let dirty = git.uncommitted()?;
     if !dirty.is_empty() {
         return Ok(Some(Unshipped::Dirty(dirty.join(", "))));
@@ -143,19 +164,33 @@ fn unshipped(git: &Git, target: &Target, url: &str) -> Result<Option<Unshipped>,
     ) else {
         return Ok(Some(Unshipped::Unbranched(Box::new(head))));
     };
-    let viewed = Cli::new([GH]).run(
+    if !git.is_ancestor(start, commit)? {
+        return Ok(Some(Unshipped::Dropped(start.to_owned())));
+    }
+    let tree = git.run(&["rev-parse", &format!("{commit}^{{tree}}")])?;
+    if tree != worktree.tree {
+        return Ok(Some(Unshipped::Altered {
+            expected: worktree.tree.clone(),
+            found: tree,
+        }));
+    }
+    let viewed = gh(
+        git,
         &[
-            "pr".into(),
-            "view".into(),
-            url.into(),
-            "--json".into(),
-            "url,state,baseRefName,headRefName,headRefOid".into(),
+            "pr",
+            "view",
+            url,
+            "--json",
+            "url,state,baseRefName,headRefName,headRefOid,isCrossRepository",
         ],
-        None,
-        Some(git.cwd),
-        git.cancellation,
     )?;
     let pr: PullRequest = serde_json::from_str(&viewed).map_err(Error::GhOutput)?;
+    if pr.is_cross_repository || !pr.url.starts_with(&format!("{}/pull/", target.repository)) {
+        return Ok(Some(Unshipped::Elsewhere {
+            url: pr.url,
+            repository: target.repository.to_owned(),
+        }));
+    }
     let expected = [
         ("state", "OPEN", pr.state),
         ("base branch", target.into.branch.as_str(), pr.base_ref_name),
@@ -171,6 +206,68 @@ fn unshipped(git: &Git, target: &Target, url: &str) -> Result<Option<Unshipped>,
             expected: expected.to_owned(),
             found,
         }))
+}
+
+fn gh(git: &Git, args: &[&str]) -> Result<String, ProcessError> {
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    Cli::new([GH]).run(&args, None, Some(git.cwd), git.cancellation)
+}
+
+// The URL of the repository the remote fetches from, as gh names it, so a pull request's URL can be
+// checked against it even after the repository is renamed.
+fn repository(git: &Git, remote: &str) -> Result<String, Error> {
+    let url = git.run(&["remote", "get-url", remote])?;
+    let name = gh_name(git, &url)?;
+    let viewed = gh(git, &["repo", "view", &name, "--json", "url"])?;
+    let repository: Repository = serde_json::from_str(&viewed).map_err(Error::GhOutput)?;
+    Ok(repository.url)
+}
+
+// The remote as the `[HOST/]OWNER/REPO` gh takes, with an SSH host alias resolved to the host it
+// names. A local repository has no such name and is left for gh to judge.
+fn gh_name(git: &Git, url: &str) -> Result<String, Error> {
+    let (ssh, authority, path) = match url.split_once("://") {
+        Some(("file", _)) => return Ok(url.to_owned()),
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            (scheme.contains("ssh"), authority, path)
+        }
+        // git reads `host:path` as SSH unless a slash or a drive letter comes before the colon.
+        None => match url.split_once(':') {
+            Some((authority, path))
+                if !(authority.contains('/') || cfg!(windows) && authority.len() == 1) =>
+            {
+                (true, authority, path)
+            }
+            _ => return Ok(url.to_owned()),
+        },
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = host.split_once(':').map_or(host, |(host, _)| host);
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let named = path
+        .split_once('/')
+        .is_some_and(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'));
+    if host.is_empty() || !named {
+        return Err(Error::NotAGitHubRemote(url.to_owned()));
+    }
+    if !ssh {
+        return Ok(format!("{host}/{path}"));
+    }
+    let config = Cli::new(["ssh"]).run(
+        &["-G".into(), "--".into(), host.into()],
+        None,
+        Some(git.cwd),
+        git.cancellation,
+    )?;
+    let host = config
+        .lines()
+        .find_map(|line| line.strip_prefix("hostname "))
+        .map_or(host, str::trim);
+    Ok(format!("{host}/{path}"))
 }
 
 fn prompt(
@@ -216,7 +313,8 @@ fn prompt(
          overwrite commits on {remote} that the branch has not seen. Then open a pull request \
          against {branch} with gh, with a one-line title and a body that describes the whole \
          change for a reviewer; if the branch already has an open pull request against {branch}, \
-         reuse it instead. Leave the working tree clean and stay on the branch you shipped from. \
+         reuse it instead. Ship the work as it is: do not change, drop, or rewrite any of it. \
+         Leave the working tree clean and stay on the branch you shipped from. \
          In url, give the pull request's URL. In report, say in one sentence what the change \
          does.",
         remote = into.remote,

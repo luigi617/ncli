@@ -33,7 +33,7 @@ case "$prompt" in
 *"as a pull request against"*)
     next ship
     eval "${FAKE_SHIP:-$SHIP}" >&2
-    answer ship ', "url": "https://example.com/pr/1"' ;;
+    answer ship ', "url": "https://example.com/owner/repo/pull/1"' ;;
 *"The check \`"*)
     next fix
     eval "${FAKE_FIX:-touch fixed}"
@@ -47,12 +47,15 @@ esac
 
     const FAKE_GH: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$NCLI_TEST_LOG/gh.log"
-[ -z "$FAKE_GH_LOGGED_OUT" ] || { echo "not logged in" >&2; exit 1; }
 case "$1 $2" in
+"repo view")
+    [ -z "$FAKE_GH_REPO_FAILS" ] || { echo "not logged in" >&2; exit 1; }
+    echo '{"url": "https://example.com/owner/repo"}' ;;
 "pr view")
+    [ -z "$FAKE_GH_PR_FAILS" ] || { echo "not logged in" >&2; exit 1; }
     branch=$(git branch --show-current)
     oid=$(git rev-parse --verify --quiet "refs/remotes/origin/$branch")
-    echo '{"url": "'"$3"'", "state": "'"${FAKE_GH_STATE:-OPEN}"'", "baseRefName": "'"${FAKE_GH_BASE:-main}"'", "headRefName": "'"${FAKE_GH_HEAD:-$branch}"'", "headRefOid": "'"$oid"'"}' ;;
+    echo '{"url": "'"${FAKE_GH_URL:-$3}"'", "state": "'"${FAKE_GH_STATE:-OPEN}"'", "baseRefName": "'"${FAKE_GH_BASE:-main}"'", "headRefName": "'"${FAKE_GH_HEAD:-$branch}"'", "headRefOid": "'"$oid"'", "isCrossRepository": '"${FAKE_GH_CROSS:-false}"'}' ;;
 esac
 "#;
 
@@ -210,6 +213,10 @@ esac
                 .collect()
         }
 
+        fn viewed_repo(&self) -> String {
+            format!("repo view {} --json url", self.origin.path().display())
+        }
+
         fn rebasing(&self) -> bool {
             self.work.path().join(".git/rebase-merge").exists()
                 || self.work.path().join(".git/rebase-apply").exists()
@@ -234,8 +241,8 @@ esac
     mod ship {
         use super::*;
 
-        const VIEW: &str =
-            "pr view https://example.com/pr/1 --json url,state,baseRefName,headRefName,headRefOid";
+        const VIEW: &str = "pr view https://example.com/owner/repo/pull/1 --json \
+            url,state,baseRefName,headRefName,headRefOid,isCrossRepository";
 
         #[test]
         fn uncommitted_changes_on_the_default_branch_become_a_new_pull_request() {
@@ -243,7 +250,7 @@ esac
             let start = env.git(&["rev-parse", "HEAD"]);
             env.write("feature.rs", "fn f() {}\n");
             let (stdout, _) = env.succeed(&["code", "ship"], &[]);
-            assert_eq!(stdout, "https://example.com/pr/1\n");
+            assert_eq!(stdout, "https://example.com/owner/repo/pull/1\n");
             assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
             assert_eq!(env.git(&["rev-parse", "HEAD~1"]), start);
             assert_eq!(env.git(&["rev-parse", "main"]), start);
@@ -251,7 +258,7 @@ esac
                 env.origin_ref("refs/heads/add-feature"),
                 Some(env.git(&["rev-parse", "HEAD"]))
             );
-            assert_eq!(env.gh_calls(), [VIEW]);
+            assert_eq!(env.gh_calls(), [env.viewed_repo(), VIEW.to_owned()]);
             let prompt = env.logged("ship.1").unwrap();
             assert!(
                 prompt.contains("as a pull request against origin/main"),
@@ -283,7 +290,7 @@ esac
             let head = env.commit("Add the feature.");
             let base = ("FAKE_GH_BASE", "develop");
             let (stdout, _) = env.succeed(&["code", "ship", "--into", "develop"], &[base]);
-            assert_eq!(stdout, "https://example.com/pr/1\n");
+            assert_eq!(stdout, "https://example.com/owner/repo/pull/1\n");
             assert_eq!(env.git(&["branch", "--show-current"]), "feature");
             assert_eq!(env.origin_ref("refs/heads/feature"), Some(head));
             let prompt = env.logged("ship.1").unwrap();
@@ -332,7 +339,7 @@ esac
                 &[ship],
                 "the working tree has uncommitted changes (feature.rs)",
             );
-            assert!(env.gh_calls().is_empty());
+            assert_eq!(env.gh_calls(), [env.viewed_repo()]);
         }
 
         #[test]
@@ -351,7 +358,7 @@ esac
                     ),
                 "{stderr}"
             );
-            assert!(env.gh_calls().is_empty());
+            assert_eq!(env.gh_calls(), [env.viewed_repo()]);
         }
 
         #[test]
@@ -372,7 +379,7 @@ esac
                     ),
                 "{stderr}"
             );
-            assert!(env.gh_calls().is_empty());
+            assert_eq!(env.gh_calls(), [env.viewed_repo()]);
         }
 
         #[test]
@@ -396,7 +403,7 @@ esac
             let head = env.git(&["rev-parse", "HEAD"]);
             assert!(
                 stderr.contains(&format!(
-                    "the pull request at https://example.com/pr/1 has head commit , not {head}: \
+                    "the pull request at https://example.com/owner/repo/pull/1 has head commit , not {head}: \
                      ship report 1\nResume: "
                 )),
                 "{stderr}"
@@ -410,7 +417,7 @@ esac
             assert_unshipped(
                 &env,
                 &[("FAKE_GH_STATE", "MERGED")],
-                "the pull request at https://example.com/pr/1 has state MERGED, not OPEN",
+                "the pull request at https://example.com/owner/repo/pull/1 has state MERGED, not OPEN",
             );
         }
 
@@ -421,7 +428,7 @@ esac
             assert_unshipped(
                 &env,
                 &[("FAKE_GH_BASE", "develop")],
-                "the pull request at https://example.com/pr/1 has base branch develop, not main",
+                "the pull request at https://example.com/owner/repo/pull/1 has base branch develop, not main",
             );
         }
 
@@ -432,8 +439,78 @@ esac
             assert_unshipped(
                 &env,
                 &[("FAKE_GH_HEAD", "other")],
-                "the pull request at https://example.com/pr/1 has head branch other, not \
+                "the pull request at https://example.com/owner/repo/pull/1 has head branch other, not \
                  add-feature",
+            );
+        }
+
+        #[test]
+        fn uncommitted_changes_the_agent_does_not_ship_are_an_error() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write("feature.rs", "fn f() {}\n");
+            env.commit("Add the feature.");
+            env.write("more.rs", "fn g() {}\n");
+            let stash = (
+                "FAKE_SHIP",
+                "git stash --quiet --include-untracked && git push --quiet --set-upstream origin HEAD",
+            );
+            let stderr = env.fail(&["code", "ship"], &[stash]);
+            assert!(
+                stderr.contains(
+                    "did not finish shipping to origin/main: the shipped commit has tree "
+                ) && stderr.contains(", the work there was to ship: ship report 1\nResume: "),
+                "{stderr}"
+            );
+            assert_eq!(env.gh_calls(), [env.viewed_repo()]);
+        }
+
+        #[test]
+        fn local_commits_the_agent_does_not_ship_are_an_error() {
+            let env = Env::new();
+            env.write("local.rs", "fn l() {}\n");
+            let start = env.commit("Local.");
+            env.write("feature.rs", "fn f() {}\n");
+            let fresh = (
+                "FAKE_SHIP",
+                "git stash --quiet --include-untracked && \
+                 git switch --quiet --create add-feature origin/main && \
+                 git stash pop --quiet && git add --all && git commit --quiet --message x && \
+                 git push --quiet --set-upstream origin HEAD",
+            );
+            assert_unshipped(
+                &env,
+                &[fresh],
+                &format!(
+                    "the shipped branch no longer contains {start}, the commit it started from"
+                ),
+            );
+            assert_eq!(env.gh_calls(), [env.viewed_repo()]);
+        }
+
+        #[test]
+        fn a_pull_request_in_another_repository_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let url = "https://example.com/other/repo/pull/1";
+            assert_unshipped(
+                &env,
+                &[("FAKE_GH_URL", url)],
+                &format!(
+                    "the pull request at {url} is not from and into https://example.com/owner/repo"
+                ),
+            );
+        }
+
+        #[test]
+        fn a_pull_request_from_another_repository_is_an_error() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            assert_unshipped(
+                &env,
+                &[("FAKE_GH_CROSS", "true")],
+                "the pull request at https://example.com/owner/repo/pull/1 is not from and into \
+                 https://example.com/owner/repo",
             );
         }
 
@@ -441,7 +518,7 @@ esac
         fn a_failing_gh_after_the_agent_can_be_resumed() {
             let env = Env::new();
             env.write("feature.rs", "fn f() {}\n");
-            let stderr = env.fail(&["code", "ship"], &[("FAKE_GH_LOGGED_OUT", "1")]);
+            let stderr = env.fail(&["code", "ship"], &[("FAKE_GH_PR_FAILS", "1")]);
             assert!(stderr.contains("not logged in"), "{stderr}");
             assert!(
                 stderr
@@ -465,7 +542,7 @@ esac
                 ),
                 "{stderr}"
             );
-            assert!(env.gh_calls().is_empty());
+            assert_eq!(env.gh_calls(), [env.viewed_repo()]);
         }
 
         fn assert_rejected(env: &Env) {
@@ -578,6 +655,15 @@ esac
                 "{stderr}"
             );
             assert_rejected(&env);
+        }
+
+        #[test]
+        fn a_repository_gh_cannot_find_is_rejected_up_front() {
+            let env = Env::new();
+            env.write("feature.rs", "fn f() {}\n");
+            let stderr = env.fail(&["code", "ship"], &[("FAKE_GH_REPO_FAILS", "1")]);
+            assert!(stderr.contains("not logged in"), "{stderr}");
+            assert_eq!(env.count("ship"), 0);
         }
 
         #[test]
@@ -952,6 +1038,54 @@ esac
             let stderr = env.fail(&["code", "sync"], &[abort]);
             assert_unfinished(&stderr, "origin/main is not in the history of the branch");
             assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_commit_the_agent_skips_puts_the_branch_back() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            let skip = ("FAKE_RESOLVE", "git rebase --skip");
+            let stderr = env.fail(&["code", "sync"], &[skip]);
+            assert_unfinished(
+                &stderr,
+                &format!("the changes of {old} are no longer on the branch"),
+            );
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_commit_git_drops_because_its_change_is_already_upstream_is_allowed() {
+            let env = Env::new();
+            feature(&env, "same.txt", "same\n");
+            env.write("README.md", "feature\n");
+            env.commit("More.");
+            let upstream = env.change_upstream("main", |clone| {
+                fs::write(clone.join("same.txt"), "same\n").unwrap();
+                fs::write(clone.join("README.md"), "upstream\n").unwrap();
+            });
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), upstream);
+            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "More.");
+            assert!(!env.rebasing());
+        }
+
+        #[test]
+        fn hidden_edits_are_rejected_up_front() {
+            let env = Env::new();
+            let (old, _) = conflicting(&env);
+            env.git(&["update-index", "--assume-unchanged", "README.md"]);
+            env.write("README.md", "hidden\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("files marked assume-unchanged or skip-worktree have edits"),
+                "{stderr}"
+            );
+            assert_eq!(env.count("resolve"), 0);
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), old);
+            assert_eq!(
+                fs::read_to_string(env.work.path().join("README.md")).unwrap(),
+                "hidden\n"
+            );
         }
 
         #[test]
