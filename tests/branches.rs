@@ -667,6 +667,23 @@ esac
         }
 
         #[test]
+        fn a_stop_that_continuing_cannot_get_past_is_put_back() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "other.md", "other\n");
+            env.git(&["config", "commit.gpgsign", "true"]);
+            env.git(&["config", "gpg.program", "false"]);
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("could not get past it")
+                    && stderr.contains("gpg failed to sign the data"),
+                "{stderr}"
+            );
+            env.assert_put_back(&tip);
+            assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
         fn markers_already_on_a_side_are_kept() {
             let env = Env::new();
             env.feature(&["feature\n=======\n"]);
@@ -688,6 +705,59 @@ esac
             );
             assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
             assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
+        fn a_submodule_edit_hidden_by_config_is_refused() {
+            let env = Env::new();
+            env.submodule();
+            let tip = env.feature(&["feature\n"]);
+            env.git(&["config", "submodule.sub.ignore", "all"]);
+            env.write("sub/one", "mine\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("has uncommitted changes or untracked files (sub)"),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
+            assert_eq!(env.read("sub/one"), "mine\n");
+        }
+
+        #[test]
+        fn an_edit_hidden_from_git_is_refused_before_fetching() {
+            let env = Env::new();
+            env.write("local.md", "base\n");
+            env.commit("Local.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "local.md", "upstream\n");
+            env.git(&["update-index", "--assume-unchanged", "local.md"]);
+            env.write("local.md", "mine\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("assume-unchanged or skip-worktree have edits")
+                    && stderr.contains("(local.md)"),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
+            assert_eq!(env.read("local.md"), "mine\n");
+            assert_ne!(env.git(&["rev-parse", "origin/main"]), env.origin("main"));
+        }
+
+        #[test]
+        fn a_conflict_rerere_resolves_is_continued_without_the_agent() {
+            let env = Env::new();
+            env.git(&["config", "rerere.enabled", "true"]);
+            env.git(&["config", "rerere.autoupdate", "true"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.succeed(&["code", "sync"], &[]);
+            env.git(&["reset", "--quiet", "--hard", &tip]);
+            let stdout = env.succeed(&["code", "sync"], &[]);
+            assert_eq!(stdout, "Rebased feature onto origin/main.\n");
+            assert_eq!(env.agent_calls(), 1);
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
+            assert_eq!(env.read("README.md"), "resolved 1\n");
         }
 
         #[test]

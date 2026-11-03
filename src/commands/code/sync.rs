@@ -25,8 +25,14 @@ pub struct Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Unresolved {
-    #[error("the rebase stopped at {0} without conflicts to resolve")]
-    NoConflicts(String),
+    #[error(
+        "the rebase stopped at {at} and continuing could not get past it ({stopped}; then {continued})"
+    )]
+    Stuck {
+        at: String,
+        stopped: Box<ProcessError>,
+        continued: Box<ProcessError>,
+    },
     #[error("the agent changed the rebase itself, not just the conflicted files")]
     Moved,
     #[error("the agent left unmerged paths ({0})")]
@@ -68,6 +74,7 @@ impl Sync {
                     .join(", "),
             });
         }
+        git.index_copy()?.1.refuse_hidden_edits()?;
         let hidden: HashSet<String> = git
             .index()?
             .hidden()
@@ -121,15 +128,34 @@ fn rebase(
     context: &Context,
 ) -> Result<usize, Error> {
     let mut resolved = 0;
+    let mut previous = None;
     let mut step = git.run(&["rebase", "--quiet", "--merge", onto]);
     loop {
-        match step {
+        let failure = match step {
             Ok(_) => return Ok(resolved),
-            Err(ProcessError::Exit { .. }) if git.in_progress()? == Some(Operation::Rebase) => {}
+            Err(error @ ProcessError::Exit { .. })
+                if git.in_progress()? == Some(Operation::Rebase) =>
+            {
+                error
+            }
             Err(error) => return Err(error.into()),
+        };
+        let stop = Stop::read(git)?;
+        let conflicted = unmerged(git)?;
+        // A stop with nothing unmerged, as when rerere resolved it, needs only continuing,
+        // unless continuing already failed there.
+        if !conflicted.is_empty() {
+            resolve(git, agent, branch, from, context, &stop, &conflicted)?;
+            resolved += 1;
+        } else if let Some((_, stopped)) = previous.take_if(|(at, _)| *at == stop.rebase_head) {
+            return Err(Unresolved::Stuck {
+                at: stop.rebase_head.unwrap_or_default(),
+                stopped: Box::new(stopped),
+                continued: Box::new(failure),
+            }
+            .into());
         }
-        resolve(git, agent, branch, from, context)?;
-        resolved += 1;
+        previous = Some((stop.rebase_head, failure));
         step = git.run(&["rebase", "--continue"]);
     }
 }
@@ -140,13 +166,9 @@ fn resolve(
     branch: &str,
     from: &Upstream,
     context: &Context,
+    stop: &Stop,
+    conflicted: &[String],
 ) -> Result<(), Error> {
-    let stop = Stop::read(git)?;
-    let conflicted = unmerged(git)?;
-    if conflicted.is_empty() {
-        let at = stop.rebase_head.clone().unwrap_or_default();
-        return Err(Unresolved::NoConflicts(at).into());
-    }
     let before = git.index()?;
     let worktree = git.status()?;
     context.progress(&format!(
@@ -154,10 +176,10 @@ fn resolve(
         count(conflicted.len(), "conflict")
     ));
     agent.perform(
-        &prompt(git, branch, from, &stop, &conflicted),
+        &prompt(git, branch, from, stop, conflicted),
         context.cancellation,
     )?;
-    if Stop::read(git)? != stop {
+    if Stop::read(git)? != *stop {
         return Err(Unresolved::Moved.into());
     }
     let unmerged = unmerged(git)?;
@@ -191,7 +213,7 @@ fn resolve(
         return Err(Unresolved::Outside(outside.join(", ")).into());
     }
     let mut marked = Vec::new();
-    for path in &conflicted {
+    for path in conflicted {
         let sides: HashSet<String> = [format!("HEAD:{path}"), format!("REBASE_HEAD:{path}")]
             .iter()
             .map(|rev| blob(git, rev))

@@ -1,22 +1,12 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::commands::code::git::{Git, Head, Index, RemoteBranch};
+use crate::commands::code::git::{DIFF, Git, Head, Index, RemoteBranch};
 use crate::error::Error;
-use crate::process::{Cancellation, Cli, ProcessError};
-
-// Keeps the user's diff settings and drivers from hiding parts of the change.
-const DIFF: [&str; 4] = [
-    "diff",
-    "--ignore-submodules=none",
-    "--no-ext-diff",
-    "--no-textconv",
-];
+use crate::process::{Cancellation, ProcessError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,23 +62,8 @@ impl Git<'_> {
         committed: &str,
         earlier: Option<&Index>,
     ) -> Result<(String, Index), Error> {
-        let dir = tempfile::Builder::new()
-            .prefix("ncli-snapshot-")
-            .tempdir()
-            .map_err(Error::Snapshot)?;
-        let index = dir.path().join("index");
-        let real_index = self
-            .cwd
-            .join(self.run(&["rev-parse", "--git-path", "index"])?);
-        copy_index(&real_index, &index).map_err(Error::Snapshot)?;
-        let git = Git {
-            cli: Cli::new(["git"]).env("GIT_INDEX_FILE", &index),
-            ..*self
-        };
-        let hidden = git.hidden_edits()?;
-        if !hidden.is_empty() {
-            return Err(Error::HiddenEdits(hidden.join(", ")));
-        }
+        let (_dir, git) = self.index_copy()?;
+        git.refuse_hidden_edits()?;
         let nested = git.nested_repositories()?;
         if !nested.is_empty() {
             return Err(Error::NestedRepositories(nested.join(", ")));
@@ -117,33 +92,6 @@ impl Git<'_> {
             return Err(Error::UndoneStagedChanges(undone.join(", ")));
         }
         Ok((snapshot, index))
-    }
-
-    fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {
-        let args = [&DIFF[..], &["--no-renames", "--name-only", "-z"], diff].concat();
-        self.run(&args)
-    }
-
-    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
-    // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
-    fn hidden_edits(&self) -> Result<Vec<String>, ProcessError> {
-        let index = self.index()?;
-        let marked: HashSet<&str> = index
-            .hidden()
-            .into_iter()
-            .filter(|&(path, skip)| !skip || self.cwd.join(path).symlink_metadata().is_ok())
-            .map(|(path, _)| path)
-            .collect();
-        if marked.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.unhide(marked.iter().copied())?;
-        let modified = self.changed_paths(&[])?;
-        Ok(modified
-            .split('\0')
-            .filter(|path| marked.contains(path))
-            .map(str::to_owned)
-            .collect())
     }
 
     // Untracked files are listed one by one, so only a nested repository is listed as a directory.
@@ -185,19 +133,6 @@ impl Git<'_> {
         }
         Ok(dirty)
     }
-}
-
-// Git distrusts cached stat data newer than the index file, so the copy keeps the original mtime.
-fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
-    let modified = match fs::metadata(from) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        metadata => metadata?.modified()?,
-    };
-    fs::copy(from, to)?;
-    fs::File::options()
-        .write(true)
-        .open(to)?
-        .set_modified(modified)
 }
 
 pub struct Worktree {

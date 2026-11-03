@@ -1,15 +1,25 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
 
 use crate::error::Error;
 use crate::process::{self, Cancellation, Cli, ProcessError};
 
 const PREFERRED_REMOTE: &str = "origin";
 const REMOTES: &str = "refs/remotes/";
+// Keeps the user's diff settings and drivers from hiding parts of the change.
+pub(super) const DIFF: [&str; 4] = [
+    "diff",
+    "--ignore-submodules=none",
+    "--no-ext-diff",
+    "--no-textconv",
+];
 const OPERATIONS: [(&str, Operation); 6] = [
     ("rebase-merge", Operation::Rebase),
     ("rebase-apply", Operation::Rebase),
@@ -208,6 +218,54 @@ impl<'a> Git<'a> {
         Ok(())
     }
 
+    // A Git on a copy of the index, which lasts as long as the directory.
+    pub(super) fn index_copy(&self) -> Result<(TempDir, Self), Error> {
+        let dir = tempfile::Builder::new()
+            .prefix("ncli-index-")
+            .tempdir()
+            .map_err(Error::IndexCopy)?;
+        let index = dir.path().join("index");
+        let real_index = self
+            .cwd
+            .join(self.run(&["rev-parse", "--git-path", "index"])?);
+        copy_index(&real_index, &index).map_err(Error::IndexCopy)?;
+        let git = Git {
+            cli: Cli::new(["git"]).env("GIT_INDEX_FILE", &index),
+            ..*self
+        };
+        Ok((dir, git))
+    }
+
+    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
+    // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
+    pub(super) fn refuse_hidden_edits(&self) -> Result<(), Error> {
+        let index = self.index()?;
+        let marked: HashSet<&str> = index
+            .hidden()
+            .into_iter()
+            .filter(|&(path, skip)| !skip || self.cwd.join(path).symlink_metadata().is_ok())
+            .map(|(path, _)| path)
+            .collect();
+        if marked.is_empty() {
+            return Ok(());
+        }
+        self.unhide(marked.iter().copied())?;
+        let modified = self.changed_paths(&[])?;
+        let hidden: Vec<&str> = modified
+            .split('\0')
+            .filter(|path| marked.contains(path))
+            .collect();
+        if hidden.is_empty() {
+            return Ok(());
+        }
+        Err(Error::HiddenEdits(hidden.join(", ")))
+    }
+
+    pub(super) fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {
+        let args = [&DIFF[..], &["--no-renames", "--name-only", "-z"], diff].concat();
+        self.run(&args)
+    }
+
     // Each changed or untracked path, with its two-letter status.
     pub(super) fn status(&self) -> Result<Vec<(String, String)>, ProcessError> {
         let status = self.run(&[
@@ -216,6 +274,7 @@ impl<'a> Git<'a> {
             "-z",
             "--untracked-files=all",
             "--no-renames",
+            "--ignore-submodules=none",
         ])?;
         Ok(status
             .split_terminator('\0')
@@ -327,4 +386,17 @@ impl<'a> Git<'a> {
             },
         }
     }
+}
+
+// Git distrusts cached stat data newer than the index file, so the copy keeps the original mtime.
+fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
+    let modified = match fs::metadata(from) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        metadata => metadata?.modified()?,
+    };
+    fs::copy(from, to)?;
+    fs::File::options()
+        .write(true)
+        .open(to)?
+        .set_modified(modified)
 }

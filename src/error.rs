@@ -47,8 +47,8 @@ pub enum Error {
         "could not find a git work tree to review the local changes of; give a link instead: {0}"
     )]
     NoLocalChange(#[source] ProcessError),
-    #[error("could not snapshot the uncommitted changes: {0}")]
-    Snapshot(#[source] io::Error),
+    #[error("could not copy the git index: {0}")]
+    IndexCopy(#[source] io::Error),
     #[error(
         "there is nothing to review in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
     )]
@@ -281,7 +281,7 @@ impl Error {
             | Self::NotInTmux
             | Self::TmuxSessions(_)
             | Self::CurrentDirectory(_)
-            | Self::Snapshot(_)
+            | Self::IndexCopy(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)
             | Self::Process(_) => Self::FAILURE,
