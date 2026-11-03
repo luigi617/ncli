@@ -1070,6 +1070,21 @@ esac
         }
 
         #[test]
+        fn a_commit_already_upstream_and_edited_there_since_is_allowed() {
+            let env = Env::new();
+            feature(&env, "same.txt", "same\n");
+            env.write("README.md", "feature\n");
+            env.commit("More.");
+            env.push_upstream("main", "same.txt", "same\n");
+            env.push_upstream("main", "same.txt", "edited\n");
+            let upstream = env.push_upstream("main", "README.md", "upstream\n");
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), upstream);
+            assert_eq!(env.git(&["log", "-1", "--format=%s"]), "More.");
+            assert!(!env.rebasing());
+        }
+
+        #[test]
         fn hidden_edits_are_rejected_up_front() {
             let env = Env::new();
             let (old, _) = conflicting(&env);

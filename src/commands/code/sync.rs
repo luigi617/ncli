@@ -153,7 +153,8 @@ impl Rebase<'_> {
     }
 
     // The branch's commits that were not replayed and whose changes HEAD lacks, since picking them
-    // onto HEAD would change it. A commit whose change is already on HEAD may be skipped.
+    // onto HEAD would change it. A commit whose change is already on HEAD, or whose patch is on the
+    // target, may be skipped.
     fn dropped(&self) -> Result<Vec<String>, ProcessError> {
         let log = |format: &str, tip: &str| {
             self.git.run(&[
@@ -171,6 +172,11 @@ impl Rebase<'_> {
             *rebased.entry(identity).or_default() += 1;
         }
         let original = log(&format!("%H%n{IDENTITY}"), self.old)?;
+        let cherry = self.git.run(&["cherry", &self.from.refname(), self.old])?;
+        let upstream: HashSet<&str> = cherry
+            .lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .collect();
         let head = self.git.run(&["rev-parse", "HEAD^{tree}"])?;
         let mut dropped = Vec::new();
         for (commit, identity) in original
@@ -179,6 +185,9 @@ impl Rebase<'_> {
         {
             if let Some(count) = rebased.get_mut(identity).filter(|count| **count > 0) {
                 *count -= 1;
+                continue;
+            }
+            if upstream.contains(commit) {
                 continue;
             }
             let picked = self.git.optional(&[
