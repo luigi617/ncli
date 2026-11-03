@@ -113,6 +113,7 @@ impl Rebase<'_> {
             "--no-update-refs",
             self.onto,
         ]) else {
+            self.git.update_submodules()?;
             return Ok(None);
         };
         if !matches!(error, ProcessError::Exit { .. })
@@ -149,6 +150,8 @@ impl Rebase<'_> {
         if !self.git.is_ancestor(self.onto, "HEAD")? {
             return Ok(Some(Unsynced::NotOnto(self.from.clone())));
         }
+        // The rebase leaves submodules checked out where they were, which would read as dirty.
+        self.git.update_submodules()?;
         let dirty = self.git.uncommitted()?;
         if !dirty.is_empty() {
             return Ok(Some(Unsynced::Dirty(dirty.join(", "))));
@@ -167,7 +170,8 @@ impl Rebase<'_> {
     // rebased commit changes is missing a hunk when picking the commit onto the rebased commit, with
     // conflicts left as the rebased commit resolved them, would change it. Commits that share an
     // identity are paired in order; when their counts differ, which of them is which is unknown and
-    // all their paths are checked against HEAD.
+    // all their paths are checked against HEAD. A path is followed through the renames between the
+    // commit's parent and the commit it is checked against, as a pick would follow it.
     fn dropped(&self) -> Result<Vec<String>, ProcessError> {
         let log = |tip: &str| {
             self.git.run(&[
@@ -211,11 +215,15 @@ impl Rebase<'_> {
                 .filter(|commits| commits.len() == originals[identity.as_str()])
                 .map(|commits| commits[*index].as_str());
             *index += 1;
+            let parent = format!("{commit}^");
             let paths = self.paths(commit)?;
             let (kept, missing): (Vec<String>, Vec<String>) = match counterpart {
                 Some(counterpart) => {
                     let changed: HashSet<String> = self.paths(counterpart)?.into_iter().collect();
-                    paths.into_iter().partition(|path| changed.contains(path))
+                    let renames = self.renames(&parent, counterpart)?;
+                    paths
+                        .into_iter()
+                        .partition(|path| changed.contains(renamed(&renames, path)))
                 }
                 None => (Vec::new(), paths),
             };
@@ -224,8 +232,11 @@ impl Rebase<'_> {
                     if paths.is_empty() {
                         return Ok(false);
                     }
+                    let renames = self.renames(&parent, onto)?;
                     let changed = self.changed_by_pick(commit, onto, resolved)?;
-                    Ok(paths.iter().any(|path| changed.contains(path)))
+                    Ok(paths
+                        .iter()
+                        .any(|path| changed.contains(renamed(&renames, path))))
                 };
             if lost("HEAD", &missing, false)?
                 || counterpart.map_or(Ok(false), |onto| lost(onto, &kept, true))?
@@ -246,6 +257,26 @@ impl Rebase<'_> {
             commit,
         ])?;
         Ok(paths.split_terminator('\0').map(str::to_owned).collect())
+    }
+
+    // Each path renamed between the two commits, with its new name.
+    fn renames(&self, from: &str, to: &str) -> Result<HashMap<String, String>, ProcessError> {
+        let renames = self.git.run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "-M",
+            "--name-status",
+            "--diff-filter=R",
+            from,
+            to,
+        ])?;
+        let mut fields = renames.split_terminator('\0');
+        let mut renamed = HashMap::new();
+        while let (Some(_), Some(old), Some(new)) = (fields.next(), fields.next(), fields.next()) {
+            renamed.insert(old.to_owned(), new.to_owned());
+        }
+        Ok(renamed)
     }
 
     // The paths that picking the commit onto `onto` would change. A conflicted pick still writes a
@@ -382,6 +413,10 @@ impl Rebase<'_> {
     }
 }
 
+fn renamed<'a>(renames: &'a HashMap<String, String>, path: &'a str) -> &'a str {
+    renames.get(path).map_or(path, String::as_str)
+}
+
 // Works wherever the agent left HEAD, even on another branch.
 fn put_back(git: &Git, branch: &str, old: &str) -> Result<(), ProcessError> {
     if let Some(operation) = git.in_progress()? {
@@ -395,5 +430,5 @@ fn put_back(git: &Git, branch: &str, old: &str) -> Result<(), ProcessError> {
         branch,
         old,
     ])?;
-    Ok(())
+    git.update_submodules()
 }

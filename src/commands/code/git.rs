@@ -218,6 +218,18 @@ impl<'a> Git<'a> {
             .is_some())
     }
 
+    // Moves only submodules already checked out, as a checkout with --recurse-submodules would.
+    pub(super) fn update_submodules(&self) -> Result<(), ProcessError> {
+        self.run(&[
+            "submodule",
+            "update",
+            "--quiet",
+            "--checkout",
+            "--recursive",
+        ])?;
+        Ok(())
+    }
+
     pub(super) fn unmerged(&self) -> Result<Vec<String>, ProcessError> {
         let entries = self.run(&["ls-files", "--unmerged", "-z"])?;
         let mut paths: Vec<String> = entries

@@ -12,7 +12,9 @@ mod binary {
     use ncli::error::Error;
     use tempfile::TempDir;
 
-    const TOOLS: [&str; 5] = ["git", "sh", "cat", "touch", "sleep"];
+    const TOOLS: [&str; 8] = [
+        "git", "sh", "cat", "touch", "sleep", "sed", "basename", "uname",
+    ];
 
     const FAKE_AGENT: &str = r#"#!/bin/sh
 prompt=$(cat)
@@ -1174,8 +1176,12 @@ esac
         }
 
         fn resolve_lines(edits: &[(usize, &str)]) -> String {
+            resolve_lines_in("lines.txt", edits)
+        }
+
+        fn resolve_lines_in(path: &str, edits: &[(usize, &str)]) -> String {
             format!(
-                "printf '{}' > lines.txt && git add lines.txt && git commit --quiet --no-edit \
+                "printf '{}' > {path} && git add {path} && git commit --quiet --no-edit \
                  --no-verify -C REBASE_HEAD && GIT_EDITOR=: git rebase --continue",
                 lines(edits).replace('\n', "\\n")
             )
@@ -1192,6 +1198,144 @@ esac
                 &format!("the changes of {old} are no longer on the branch"),
             );
             assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_hunk_the_agent_drops_from_a_file_the_target_renamed_puts_the_branch_back() {
+            let env = Env::new();
+            env.write("lines.txt", &lines(&[]));
+            env.commit("Lines.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let old = feature(
+                &env,
+                "lines.txt",
+                &lines(&[(1, "feature"), (5, "five"), (10, "ten")]),
+            );
+            env.change_upstream("main", |clone| {
+                fs::remove_file(clone.join("lines.txt")).unwrap();
+                fs::write(clone.join("moved.txt"), lines(&[(1, "upstream")])).unwrap();
+            });
+            let resolve = resolve_lines_in("moved.txt", &[(1, "both"), (5, "five")]);
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert_unfinished(
+                &stderr,
+                &format!("the changes of {old} are no longer on the branch"),
+            );
+            assert_restored(&env, &old);
+        }
+
+        #[test]
+        fn a_file_the_target_renamed_keeps_the_changes_of_the_branch() {
+            let env = Env::new();
+            env.write("lines.txt", &lines(&[]));
+            env.commit("Lines.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            feature(
+                &env,
+                "lines.txt",
+                &lines(&[(1, "feature"), (5, "five"), (10, "ten")]),
+            );
+            env.change_upstream("main", |clone| {
+                fs::remove_file(clone.join("lines.txt")).unwrap();
+                fs::write(clone.join("moved.txt"), lines(&[(1, "upstream")])).unwrap();
+            });
+            let resolve = resolve_lines_in("moved.txt", &[(1, "both"), (5, "five"), (10, "ten")]);
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
+            assert_eq!(
+                env.git(&["show", "HEAD:moved.txt"]),
+                lines(&[(1, "both"), (5, "five"), (10, "ten")]).trim_end()
+            );
+        }
+
+        // A repository with the submodule dep, whose pointer main moves to a commit the
+        // submodule's clone already has.
+        fn with_submodule(env: &Env) -> TempDir {
+            let sub = TempDir::new().unwrap();
+            git(sub.path(), &["init", "--quiet", "--initial-branch", "main"]);
+            fs::write(sub.path().join("dep.txt"), "one\n").unwrap();
+            git(sub.path(), &["add", "--all"]);
+            git(sub.path(), &["commit", "--quiet", "--message", "One."]);
+            let url = sub.path().to_str().unwrap();
+            env.git(&[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                url,
+                "dep",
+            ]);
+            env.commit("Dep.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            sub
+        }
+
+        fn bump_submodule(env: &Env) {
+            let dep = env.work.path().join("dep");
+            fs::write(dep.join("dep.txt"), "two\n").unwrap();
+            git(&dep, &["commit", "--quiet", "--all", "--message", "Two."]);
+            let bumped = git(&dep, &["rev-parse", "HEAD"]);
+            git(&dep, &["checkout", "--quiet", "HEAD~1"]);
+            env.change_upstream("main", |clone| {
+                git(
+                    clone,
+                    &[
+                        "update-index",
+                        "--cacheinfo",
+                        &format!("160000,{bumped},dep"),
+                    ],
+                );
+            });
+        }
+
+        fn assert_submodule_at_target(env: &Env) {
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+            assert_eq!(
+                fs::read_to_string(env.work.path().join("dep/dep.txt")).unwrap(),
+                "two\n"
+            );
+        }
+
+        #[test]
+        fn a_submodule_the_target_moves_is_checked_out_after_a_clean_rebase() {
+            let env = Env::new();
+            let _sub = with_submodule(&env);
+            feature(&env, "feature.rs", "fn f() {}\n");
+            bump_submodule(&env);
+            let (stdout, _) = env.succeed(&["code", "sync"], &[]);
+            assert!(
+                stdout.starts_with("Rebased feature onto origin/main, "),
+                "{stdout}"
+            );
+            assert_submodule_at_target(&env);
+        }
+
+        #[test]
+        fn a_submodule_the_target_moves_is_checked_out_after_resolving_conflicts() {
+            let env = Env::new();
+            let _sub = with_submodule(&env);
+            feature(&env, "README.md", "feature\n");
+            bump_submodule(&env);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.count("resolve"), 1);
+            assert_submodule_at_target(&env);
+        }
+
+        #[test]
+        fn a_branch_put_back_has_its_submodules_put_back() {
+            let env = Env::new();
+            let _sub = with_submodule(&env);
+            let old = feature(&env, "README.md", "feature\n");
+            bump_submodule(&env);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.fail(&["code", "sync"], &[("FAKE_RESOLVE", THEIRS)]);
+            assert_restored(&env, &old);
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+            assert_eq!(
+                fs::read_to_string(env.work.path().join("dep/dep.txt")).unwrap(),
+                "one\n"
+            );
         }
 
         #[test]
