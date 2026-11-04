@@ -417,6 +417,17 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
         }
 
         #[test]
+        fn a_new_branch_is_pushed_past_a_leftover_tracking_ref_of_its_name() {
+            let env = Env::new();
+            let main = env.git(&["rev-parse", "HEAD"]);
+            env.git(&["update-ref", "refs/remotes/origin/add-feature", &main]);
+            env.write("feature.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
+            assert_eq!(env.origin("add-feature"), env.git(&["rev-parse", "HEAD"]));
+        }
+
+        #[test]
         fn a_branch_without_a_tracking_ref_is_pushed_when_it_fast_forwards() {
             let env = Env::new();
             env.git(&["switch", "--quiet", "--create", "feat"]);

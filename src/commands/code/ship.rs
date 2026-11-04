@@ -146,10 +146,15 @@ impl Ship {
         context.progress(&format!("pushing {branch}"));
         // A full refspec, so push config cannot send the branch to another remote branch.
         let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        // A new branch must not exist on the remote, whatever a leftover tracking ref says.
+        let lease = match current {
+            Some(_) => "--force-with-lease".to_owned(),
+            None => format!("--force-with-lease=refs/heads/{branch}:"),
+        };
         git.run(&[
             "push",
             "--quiet",
-            "--force-with-lease",
+            &lease,
             "--force-if-includes",
             "--set-upstream",
             &into.remote,
