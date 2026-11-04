@@ -278,6 +278,7 @@ fn marker_lines(git: &Git, path: &str, stages: &[u8]) -> Result<HashSet<String>,
         .split('\0')
         .nth(2)
         .and_then(|size| size.parse().ok())
+        .filter(|&size| size > 0)
         .unwrap_or(7);
     let separator = "=".repeat(size);
     let markers = ['<', '|', '>'].map(|marker| marker.to_string().repeat(size));

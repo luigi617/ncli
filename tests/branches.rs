@@ -878,6 +878,18 @@ esac
         }
 
         #[test]
+        fn a_marker_size_of_zero_counts_as_the_default() {
+            let env = Env::new();
+            env.write(".gitattributes", "README.md conflict-marker-size=0\n");
+            env.commit("Attributes.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "printf 'resolved\\n' > README.md && git add README.md";
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+        }
+
+        #[test]
         fn an_agent_that_leaves_unmerged_paths_is_undone() {
             fails_and_puts_back("true", "the agent left unmerged paths (README.md)");
         }
