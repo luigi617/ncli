@@ -3,7 +3,7 @@ use std::path::Path;
 use clap::Args;
 use clap::builder::NonEmptyStringValueParser;
 
-use super::review::{Git, Worktree};
+use super::review::Git;
 use crate::agent::AgentKind;
 use crate::commands::Context;
 use crate::error::Error;
@@ -51,9 +51,8 @@ impl Sync {
         let (Some(branch), Some(tip)) = (head.branch.clone(), head.commit.clone()) else {
             return Err(Error::NotOnBranch(Box::new(head)));
         };
-        // The snapshot also sees work git status can hide, which putting the branch back would lose.
-        let snapshot = Worktree::snapshot(context.cancellation)?;
-        if snapshot.tree != git.run(&["rev-parse", "HEAD^{tree}"])? {
+        // Putting the branch back would lose any uncommitted work.
+        if git.uncommitted()? {
             return Err(Error::UncommittedChanges(repo));
         }
         let default = git.default_branch()?;
@@ -127,6 +126,7 @@ fn unsynced(git: &Git, branch: &str, onto: &str, tip: &str) -> Result<Option<Uns
     {
         return Ok(Some(Unsynced::Dropped));
     }
+    update_submodules(git)?;
     if git.uncommitted()? {
         return Ok(Some(Unsynced::Uncommitted));
     }
@@ -165,6 +165,13 @@ fn restore(git: &Git, branch: &str, tip: &str) -> Result<(), ProcessError> {
     git.run(&["symbolic-ref", "HEAD", branch])?;
     git.run(&["reset", "--quiet", "--hard", tip])?;
     git.run(&["clean", "--quiet", "--force", "--force", "-d"])?;
+    update_submodules(git)
+}
+
+// Rebasing and resetting move submodule pointers but leave the submodules checked out where they
+// were. The checkouts were clean before the sync, so they can follow.
+fn update_submodules(git: &Git) -> Result<(), ProcessError> {
+    git.run(&["submodule", "update", "--quiet", "--recursive"])?;
     Ok(())
 }
 

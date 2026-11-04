@@ -242,6 +242,19 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
         }
 
         #[test]
+        fn hidden_edits_left_uncommitted_fail() {
+            let env = Env::new();
+            env.git(&["update-index", "--assume-unchanged", "README.md"]);
+            env.write("README.md", "local\n");
+            env.write("feature.rs", "\n");
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(
+                stderr.contains("have edits that would be missed (README.md)"),
+                "{stderr}"
+            );
+        }
+
+        #[test]
         fn a_pull_request_that_is_not_open_fails() {
             unshipped(
                 &[("FAKE_PR_STATE", "MERGED")],
@@ -420,6 +433,81 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
                 &[("FAKE_AFTER", "git switch --quiet --detach")],
                 "HEAD is no longer on the branch",
             );
+        }
+
+        // Adds a submodule `sub` on main, at the first of its two commits, and returns the second.
+        fn submodule(env: &Env) -> (TempDir, String) {
+            let sub = TempDir::new().unwrap();
+            git(sub.path(), &["init", "--quiet", "--initial-branch", "main"]);
+            for message in ["One.", "Two."] {
+                git(
+                    sub.path(),
+                    &["commit", "--quiet", "--allow-empty", "--message", message],
+                );
+            }
+            let url = sub.path().to_str().unwrap();
+            env.git(&[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                url,
+                "sub",
+            ]);
+            git(
+                &env.work.path().join("sub"),
+                &["checkout", "--quiet", "HEAD~1"],
+            );
+            env.commit("Submodule.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let two = git(sub.path(), &["rev-parse", "HEAD"]);
+            (sub, two)
+        }
+
+        // Moves the submodule to its second commit on origin's main, as a teammate would.
+        fn bump_upstream(env: &Env, two: &str) {
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            let info = format!("160000,{two},sub");
+            git(clone.path(), &["update-index", "--cacheinfo", &info]);
+            git(clone.path(), &["commit", "--quiet", "--message", "Bump."]);
+            git(clone.path(), &["push", "--quiet", "origin", "main"]);
+        }
+
+        #[test]
+        fn a_submodule_the_target_moves_is_checked_out_where_it_points() {
+            let env = Env::new();
+            let (_sub, two) = submodule(&env);
+            env.feature(&["feature\n"]);
+            bump_upstream(&env, &two);
+            env.write("README.md", "feature\n");
+            env.succeed(
+                &["code", "sync"],
+                &[(
+                    "FAKE_RESOLVE",
+                    "printf 'x\\n' > README.md; git add README.md",
+                )],
+            );
+            assert_eq!(
+                git(&env.work.path().join("sub"), &["rev-parse", "HEAD"]),
+                two
+            );
+            assert_eq!(env.git(&["status", "--porcelain"]), "");
+        }
+
+        #[test]
+        fn a_submodule_is_put_back_with_the_branch() {
+            let env = Env::new();
+            let (_sub, two) = submodule(&env);
+            let tip = env.feature(&["feature\n"]);
+            bump_upstream(&env, &two);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.fail(&["code", "sync"], &[("FAKE_STOP", "1")]);
+            env.assert_put_back(&tip);
         }
 
         #[test]

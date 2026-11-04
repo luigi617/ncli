@@ -143,11 +143,11 @@ impl<'a> Git<'a> {
         Ok(self.cwd.join(self.run(&["rev-parse", "--git-path", name])?))
     }
 
-    pub(in crate::commands::code) fn uncommitted(&self) -> Result<bool, ProcessError> {
-        // Explicit, since config can hide the untracked files an agent left behind.
-        Ok(!self
-            .run(&["status", "--porcelain", "--untracked-files=normal"])?
-            .is_empty())
+    // A snapshot, unlike git status, sees untracked files that config hides, and refuses edits to
+    // files marked assume-unchanged or skip-worktree.
+    pub(in crate::commands::code) fn uncommitted(&self) -> Result<bool, Error> {
+        let snapshot = Worktree::snapshot(self.cancellation)?;
+        Ok(snapshot.tree != self.run(&["rev-parse", "HEAD^{tree}"])?)
     }
 
     fn empty_tree(&self) -> Result<String, ProcessError> {

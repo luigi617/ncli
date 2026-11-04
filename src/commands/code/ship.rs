@@ -118,8 +118,9 @@ fn prompt(repo: &Path, into: &str) -> String {
         "Ship the work in the repository at `{}` as a pull request into the branch {into}. Commit \
          any uncommitted changes with a message of one short sentence. If HEAD is detached or on \
          {into} or the remote's default branch, first create a branch named in a few lowercase \
-         words joined by hyphens. Push the branch, without overwriting commits on the remote that \
-         the branch does not have; if the push is rejected for that reason, stop and say so. If a \
+         words joined by hyphens. Push the branch with `git push --force-with-lease \
+         --force-if-includes`, which may replace the branch's own earlier commits, as after a \
+         rebase, but not commits it never had; if the push is rejected, stop and say so. If a \
          pull request from the branch into {into} is already open, use it; otherwise open one \
          with gh, with a short title and a body that says what the change does and why. Leave \
          nothing uncommitted. Give the pull request's URL as url.",
