@@ -1,5 +1,4 @@
 mod fix;
-pub(crate) mod git;
 mod implement;
 mod publish_comment;
 pub mod review;
@@ -11,8 +10,8 @@ use clap::Subcommand;
 pub use fix::Fix;
 pub use implement::Implement;
 pub use publish_comment::PublishComment;
-pub use ship::{Ship, Unusable};
-pub use sync::{Sync, Unresolved};
+pub use ship::{Ship, Unshipped};
+pub use sync::{Sync, Unsynced};
 
 use super::{Context, Output};
 use crate::error::Error;

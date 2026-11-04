@@ -9,7 +9,8 @@ use std::time::Duration;
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-pub use change::{Base, Change, Worktree};
+pub(in crate::commands::code) use change::Git;
+pub use change::{Base, Change, Head, RemoteBranch, Worktree};
 pub use verdict::{Finding, Report, SCHEMA, Verdict};
 
 use crate::agent::{Agent, AgentKind, WORKDIR};

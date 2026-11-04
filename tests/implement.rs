@@ -410,7 +410,7 @@ esac
         let stderr = env.fail(&[], &[("FAKE_IMPLEMENT", implement)]);
         assert!(
             stderr.contains(
-                "the working tree undoes staged changes that would be missed (hidden.rs)"
+                "the working tree undoes staged changes the review would miss (hidden.rs)"
             ),
             "{stderr}"
         );
@@ -544,7 +544,7 @@ esac
             .unwrap();
         let stderr = env.fail(&[], &[]);
         assert!(
-            stderr.contains("untracked git repositories cannot be included (nested)"),
+            stderr.contains("untracked git repositories cannot be reviewed (nested)"),
             "{stderr}"
         );
         assert!(env.logged("implement.1").is_none());

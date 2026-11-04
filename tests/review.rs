@@ -486,8 +486,8 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: the repository has several default branches \
-                 (fork/main, upstream/main) and none on origin"
+                "ncli code review: error: the repository has several default branches to compare \
+                 the current branch with (fork/main, upstream/main) and none on origin"
             ),
             "{error}"
         );
@@ -526,7 +526,8 @@ esac
             &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
         );
         assert!(local_review_error(repo.path()).contains(
-            "ncli code review: error: the repository has no default branch; set one with `git remote set-head <remote> --auto`"
+            "ncli code review: error: the repository has no default branch to compare the current \
+             branch with; set one with `git remote set-head <remote> --auto`"
         ));
         let empty = empty_repo();
         let root = empty.path().canonicalize().unwrap();
@@ -591,7 +592,7 @@ esac
             assert!(
                 error.contains(&format!(
                     "ncli code review: error: the uncommitted changes inside submodules of {} \
-                     cannot be included (sub); commit them in the submodules first",
+                     cannot be reviewed (sub); commit them in the submodules first",
                     root.display()
                 )),
                 "{ignore:?}: {error}"
@@ -714,10 +715,10 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "marked assume-unchanged or skip-worktree have edits that would be missed \
-                 (README.md); commit or revert them, or clear the marks with `git update-index \
-                 --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree \
-                 <paths>`"
+                "ncli code review: error: files marked assume-unchanged or skip-worktree have edits \
+                 the review would miss (README.md); commit or revert them, or clear the marks with \
+                 `git update-index --no-assume-unchanged <paths>` and then `git update-index \
+                 --no-skip-worktree <paths>`"
             ),
             "{error}"
         );
@@ -738,7 +739,7 @@ esac
         fs::write(repo.path().join("README.md"), "secret\n").unwrap();
         let error = local_review_error(repo.path());
         assert!(
-            error.contains("have edits that would be missed (README.md)"),
+            error.contains("have edits the review would miss (README.md)"),
             "{error}"
         );
         assert_eq!(
@@ -806,8 +807,8 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: the working tree undoes staged changes that would be \
-                 missed (README.md, kept.rs); commit them, or make the working tree match the index"
+                "ncli code review: error: the working tree undoes staged changes the review would \
+                 miss (README.md, kept.rs); commit them, or make the working tree match the index"
             ),
             "{error}"
         );
@@ -835,8 +836,8 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: the repository has several default branches \
-                 (origin/team/main, upstream/main) and none on origin"
+                "ncli code review: error: the repository has several default branches to compare \
+                 the current branch with (origin/team/main, upstream/main) and none on origin"
             ),
             "{error}"
         );
@@ -857,7 +858,7 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: untracked git repositories cannot be included \
+                "ncli code review: error: untracked git repositories cannot be reviewed \
                  (deep/empty, nested); ignore them or add them as submodules"
             ),
             "{error}"

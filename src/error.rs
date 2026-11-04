@@ -1,9 +1,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use crate::commands::code::git::{Head, Operation, RemoteBranch};
-use crate::commands::code::review::Change;
-use crate::commands::code::{Unresolved, Unusable};
+use crate::commands::code::review::{Change, Head, RemoteBranch};
+use crate::commands::code::{Unshipped, Unsynced};
 use crate::commands::session::SessionName;
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
@@ -31,10 +30,12 @@ pub enum Error {
     #[error("the judge could not access {0}")]
     ChangeUnavailable(Change),
     #[error(
-        "the repository has no default branch; set one with `git remote set-head <remote> --auto`"
+        "the repository has no default branch to compare the current branch with; set one with `git remote set-head <remote> --auto`"
     )]
     NoDefaultBranch,
-    #[error("the repository has several default branches ({branches}) and none on {preferred}")]
+    #[error(
+        "the repository has several default branches to compare the current branch with ({branches}) and none on {preferred}"
+    )]
     AmbiguousDefaultBranch {
         branches: String,
         preferred: &'static str,
@@ -47,8 +48,8 @@ pub enum Error {
         "could not find a git work tree to review the local changes of; give a link instead: {0}"
     )]
     NoLocalChange(#[source] ProcessError),
-    #[error("could not copy the git index: {0}")]
-    IndexCopy(#[source] io::Error),
+    #[error("could not snapshot the uncommitted changes: {0}")]
+    Snapshot(#[source] io::Error),
     #[error(
         "there is nothing to review in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
     )]
@@ -58,80 +59,57 @@ pub enum Error {
     )]
     NoCommonHistory { repo: PathBuf, base: RemoteBranch },
     #[error(
-        "the uncommitted changes inside submodules of {} cannot be included ({submodules}); commit them in the submodules first", .repo.display()
+        "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files in {} marked assume-unchanged or skip-worktree have edits that would be missed ({paths}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`", .repo.display()
+        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
     )]
-    HiddenEdits { repo: PathBuf, paths: String },
+    HiddenEdits(String),
     #[error(
-        "untracked git repositories cannot be included ({0}); ignore them or add them as submodules"
+        "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
     )]
     NestedRepositories(String),
     #[error(
-        "the working tree undoes staged changes that would be missed ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
+        "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
     )]
     UndoneStagedChanges(String),
-    #[error(
-        "there is nothing to ship in {}: no uncommitted changes and no commits that are not on {base}", .repo.display()
-    )]
-    NothingToShip { repo: PathBuf, base: RemoteBranch },
-    #[error("a {operation} is in progress in {}; finish or abort it first", .repo.display())]
-    OperationInProgress { repo: PathBuf, operation: Operation },
-    #[error("HEAD is {0}, not a branch to rebase")]
-    NotOnBranch(Box<Head>),
-    #[error(
-        "the working tree in {} has uncommitted changes or untracked files ({paths}); commit, stash, or remove them first", .repo.display()
-    )]
-    UncommittedChanges { repo: PathBuf, paths: String },
-    #[error("could not rebase {branch} onto {from}, so it was put back at {tip}: {source}")]
-    NotSynced {
-        branch: String,
-        from: String,
-        tip: String,
-        source: Box<Error>,
+    #[error("{agent} reported {url}, but it is not shipped: {problem}\n{}", .report.trim())]
+    NotShipped {
+        agent: String,
+        url: String,
+        problem: Unshipped,
+        report: String,
     },
-    #[error(
-        "could not rebase {branch} onto {from}: {source}\nputting it back at {tip} also failed: {restore}"
-    )]
-    NotRestored {
-        branch: String,
-        from: String,
-        tip: String,
-        source: Box<Error>,
-        restore: Box<Error>,
-    },
-    #[error("could not read the rebase state: {0}")]
-    RebaseState(#[source] io::Error),
-    #[error("could not remove {}, which the agent created: {source}", .path.display())]
-    RemoveCreated { path: PathBuf, source: io::Error },
-    #[error("code sync does not support submodules, and {branch} has one at {path}")]
-    Submodule { branch: String, path: String },
-    #[error(transparent)]
-    Unresolved(#[from] Unresolved),
-    #[error("{agent} changed the work in {} while describing it, so it was not shipped", .repo.display())]
-    ChangedWhileDescribing { agent: String, repo: PathBuf },
-    #[error("{agent} gave an answer that cannot be shipped: {problem}")]
-    UnusableAnswer { agent: String, problem: Unusable },
-    #[error(
-        "{branch} tracks {upstream}, but ncli would push it to {pushed}; push it there yourself, or stop tracking with `git branch --unset-upstream`"
-    )]
-    OtherUpstream {
-        branch: String,
-        upstream: RemoteBranch,
-        pushed: RemoteBranch,
-    },
-    #[error(
-        "the remote {0} has more than one URL, or pushes to another URL than it fetches from, which code ship does not support"
-    )]
-    SeparatePushUrl(String),
-    #[error(
-        "{branch} on {remote} has commits this branch never had; fetch them with `git fetch {remote}` and look at them first"
-    )]
-    Unfetched { remote: String, branch: String },
     #[error("gh returned unexpected output: {0}")]
     GhOutput(#[source] serde_json::Error),
+    #[error("HEAD is {0}, not a branch to rebase")]
+    NotOnBranch(Box<Head>),
+    #[error("a rebase is in progress in {}; finish or abort it first", .0.display())]
+    Rebasing(PathBuf),
+    #[error("{} has uncommitted changes or untracked files; commit, stash, or remove them first", .0.display())]
+    UncommittedChanges(PathBuf),
+    #[error("{agent} did not finish the rebase: {problem}\n{}", .report.trim())]
+    Unsynced {
+        agent: String,
+        problem: Unsynced,
+        report: String,
+    },
+    #[error("could not rebase onto {target}, so the branch was put back at {tip}: {source}")]
+    NotSynced {
+        target: String,
+        tip: String,
+        source: Box<Error>,
+    },
+    #[error(
+        "could not rebase onto {target}: {source}\nputting the branch back at {tip} also failed: {restore}"
+    )]
+    NotRestored {
+        target: String,
+        tip: String,
+        source: Box<Error>,
+        restore: Box<ProcessError>,
+    },
     #[error("{agent} left no changes in {} to review: {}", .repo.display(), .report.trim())]
     NothingImplemented {
         agent: String,
@@ -258,24 +236,16 @@ impl Error {
             | Self::NoChanges { .. }
             | Self::NoCommonHistory { .. }
             | Self::DirtySubmodules { .. }
-            | Self::HiddenEdits { .. }
+            | Self::HiddenEdits(_)
             | Self::NestedRepositories(_)
             | Self::UndoneStagedChanges(_)
             | Self::NothingImplemented { .. }
-            | Self::NothingToShip { .. }
-            | Self::OperationInProgress { .. }
-            | Self::NotOnBranch(_)
-            | Self::UncommittedChanges { .. }
-            | Self::Unresolved(_)
-            | Self::RebaseState(_)
-            | Self::RemoveCreated { .. }
-            | Self::Submodule { .. }
-            | Self::ChangedWhileDescribing { .. }
-            | Self::UnusableAnswer { .. }
-            | Self::OtherUpstream { .. }
-            | Self::SeparatePushUrl(_)
-            | Self::Unfetched { .. }
+            | Self::NotShipped { .. }
             | Self::GhOutput(_)
+            | Self::NotOnBranch(_)
+            | Self::Rebasing(_)
+            | Self::UncommittedChanges(_)
+            | Self::Unsynced { .. }
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
             | Self::NothingWritten(_)
@@ -297,7 +267,7 @@ impl Error {
             | Self::NotInTmux
             | Self::TmuxSessions(_)
             | Self::CurrentDirectory(_)
-            | Self::IndexCopy(_)
+            | Self::Snapshot(_)
             | Self::Output(_)
             | Self::InterruptHandler(_)
             | Self::Process(_) => Self::FAILURE,
