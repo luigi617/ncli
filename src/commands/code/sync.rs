@@ -13,8 +13,6 @@ use crate::commands::{Context, count};
 use crate::error::Error;
 use crate::process::{Cancellation, Cli, ProcessError};
 
-const MARKERS: [&str; 3] = ["<<<<<<<", "|||||||", ">>>>>>>"];
-
 /// Rebase the current branch onto another branch, resolving conflicts with an agent.
 ///
 /// The working tree must be clean, including files marked assume-unchanged or skip-worktree. The
@@ -175,7 +173,7 @@ fn resolve(
     let before_worktree = worktree(git)?;
     let sides = conflicted
         .iter()
-        .map(|path| marker_lines(git, [2, 3].map(|stage| format!(":{stage}:{path}"))))
+        .map(|path| marker_lines(git, path, &[2, 3]))
         .collect::<Result<Vec<_>, _>>()?;
     context.progress(&format!(
         "resolving {}",
@@ -219,7 +217,7 @@ fn resolve(
     }
     let mut marked = Vec::new();
     for (path, sides) in conflicted.iter().zip(&sides) {
-        if !marker_lines(git, [format!(":0:{path}")])?.is_subset(sides) {
+        if !marker_lines(git, path, &[0])?.is_subset(sides) {
             marked.push(path.as_str());
         }
     }
@@ -272,17 +270,24 @@ fn blob(git: &Git, rev: &str) -> Result<String, ProcessError> {
     })
 }
 
-fn marker_lines(
-    git: &Git,
-    revs: impl IntoIterator<Item = String>,
-) -> Result<HashSet<String>, ProcessError> {
+// The lines in the path's blobs at these index stages that could be conflict markers, at the
+// size the path's attributes give them.
+fn marker_lines(git: &Git, path: &str, stages: &[u8]) -> Result<HashSet<String>, ProcessError> {
+    let size = git
+        .run(&["check-attr", "-z", "conflict-marker-size", "--", path])?
+        .split('\0')
+        .nth(2)
+        .and_then(|size| size.parse().ok())
+        .unwrap_or(7);
+    let separator = "=".repeat(size);
+    let markers = ['<', '|', '>'].map(|marker| marker.to_string().repeat(size));
     let mut lines = HashSet::new();
-    for rev in revs {
+    for stage in stages {
         lines.extend(
-            blob(git, &rev)?
+            blob(git, &format!(":{stage}:{path}"))?
                 .lines()
                 .filter(|line| {
-                    *line == "=======" || MARKERS.iter().any(|marker| line.starts_with(marker))
+                    *line == separator || markers.iter().any(|marker| line.starts_with(marker))
                 })
                 .map(str::to_owned),
         );

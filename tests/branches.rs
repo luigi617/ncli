@@ -380,10 +380,8 @@ esac
             env.write("feature.rs", "\n");
             let start = env.commit("Feature.");
             env.git(&["push", "--quiet", "--set-upstream", "origin", "feat"]);
-            git(
-                env.origin.path(),
-                &["branch", "--quiet", "--delete", "--force", "feat"],
-            );
+            let main = env.origin("main");
+            git(env.origin.path(), &["update-ref", "refs/heads/feat", &main]);
             env.write("more.rs", "\n");
             let stderr = env.fail(&["code", "ship"], &[]);
             assert!(
@@ -391,6 +389,34 @@ esac
                 "{stderr}"
             );
             assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
+        }
+
+        #[test]
+        fn a_branch_deleted_on_the_remote_is_pushed_again() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feat"]);
+            env.write("feature.rs", "\n");
+            env.commit("Feature.");
+            env.git(&["push", "--quiet", "--set-upstream", "origin", "feat"]);
+            git(
+                env.origin.path(),
+                &["branch", "--quiet", "--delete", "--force", "feat"],
+            );
+            env.write("more.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.origin("feat"), env.git(&["rev-parse", "HEAD"]));
+        }
+
+        #[test]
+        fn shipping_again_with_nothing_new_skips_the_agent() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            let open =
+                r#"[{"url": "https://example.com/owner/repo/pull/7", "isCrossRepository": false}]"#;
+            env.succeed(&["code", "ship"], &[("FAKE_GH_OPEN", open)]);
+            let stdout = env.succeed(&["code", "ship"], &[("FAKE_GH_OPEN", open)]);
+            assert_eq!(stdout, "https://example.com/owner/repo/pull/7\n");
+            assert_eq!(env.agent_calls(), 1);
         }
 
         #[test]
@@ -628,7 +654,10 @@ esac
         }
 
         fn fails_and_puts_back(resolve: &str, expected: &str) -> Env {
-            let env = Env::new();
+            fails_and_puts_back_in(Env::new(), resolve, expected)
+        }
+
+        fn fails_and_puts_back_in(env: Env, resolve: &str, expected: &str) -> Env {
             let tip = env.feature(&["feature\n"]);
             env.push_upstream("main", "README.md", "upstream\n");
             let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
@@ -830,6 +859,19 @@ esac
         #[test]
         fn an_agent_that_leaves_markers_is_undone() {
             fails_and_puts_back(
+                "git add README.md",
+                "the agent left conflict markers in README.md",
+            );
+        }
+
+        #[test]
+        fn an_agent_that_leaves_markers_of_a_configured_size_is_undone() {
+            let env = Env::new();
+            env.write(".gitattributes", "README.md conflict-marker-size=5\n");
+            env.commit("Attributes.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            fails_and_puts_back_in(
+                env,
                 "git add README.md",
                 "the agent left conflict markers in README.md",
             );

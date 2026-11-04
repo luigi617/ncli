@@ -101,7 +101,12 @@ impl Ship {
         }
         gh(&git, &["repo", "view", &remote_url, "--json", "url"], None)?;
         if let Some(branch) = current {
-            check_fetched(&git, &into.remote, branch)?;
+            let pushed = check_fetched(&git, &into.remote, branch)?;
+            if !uncommitted && pushed == head.commit {
+                if let Some(url) = open_pull_request(&git, branch, &into.branch, &remote_url)? {
+                    return Ok(url);
+                }
+            }
         }
         context.progress("describing the change");
         let (_, shipment) = agent.perform_as::<Shipment>(
@@ -149,27 +154,8 @@ impl Ship {
             &into.remote,
             &refspec,
         ])?;
-        let listed = gh(
-            &git,
-            &[
-                "pr",
-                "list",
-                "--head",
-                &branch,
-                "--base",
-                &into.branch,
-                "--state",
-                "open",
-                "--json",
-                "url,isCrossRepository",
-                "--repo",
-                &remote_url,
-            ],
-            None,
-        )?;
-        let open: Vec<PullRequest> = serde_json::from_str(&listed).map_err(Error::GhOutput)?;
-        if let Some(pull_request) = open.into_iter().find(|open| !open.is_cross_repository) {
-            return Ok(pull_request.url);
+        if let Some(url) = open_pull_request(&git, &branch, &into.branch, &remote_url)? {
+            return Ok(url);
         }
         context.progress("opening the pull request");
         let created = gh(
@@ -239,27 +225,63 @@ impl Shipment {
     }
 }
 
-// The push lease would reject the branch anyway, but only after the agent ran and the commit was made.
-fn check_fetched(git: &Git, remote: &str, branch: &str) -> Result<(), Error> {
+fn open_pull_request(
+    git: &Git,
+    branch: &str,
+    base: &str,
+    repo: &str,
+) -> Result<Option<String>, Error> {
+    let listed = gh(
+        git,
+        &[
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--base",
+            base,
+            "--state",
+            "open",
+            "--json",
+            "url,isCrossRepository",
+            "--repo",
+            repo,
+        ],
+        None,
+    )?;
+    let open: Vec<PullRequest> = serde_json::from_str(&listed).map_err(Error::GhOutput)?;
+    Ok(open
+        .into_iter()
+        .find(|open| !open.is_cross_repository)
+        .map(|pull_request| pull_request.url))
+}
+
+// The commit the branch is at on the remote. The push lease would reject a branch changed there
+// anyway, but only after the agent ran and the commit was made. One deleted there, as after a
+// merge, holds nothing to keep, so its stale tracking ref is dropped.
+fn check_fetched(git: &Git, remote: &str, branch: &str) -> Result<Option<String>, Error> {
+    let tracking = format!("refs/remotes/{remote}/{branch}");
     let listed = git.run(&[
         "ls-remote",
         "--heads",
         remote,
         &format!("refs/heads/{branch}"),
     ])?;
-    let fetched = git.optional(&[
-        "rev-parse",
-        "--verify",
-        "--quiet",
-        &format!("refs/remotes/{remote}/{branch}"),
-    ])?;
-    if listed.split_whitespace().next() != fetched.as_deref() {
-        return Err(Error::Unfetched {
-            remote: remote.to_owned(),
-            branch: branch.to_owned(),
-        });
+    let listed = listed.split_whitespace().next().map(str::to_owned);
+    let fetched = git.optional(&["rev-parse", "--verify", "--quiet", &tracking])?;
+    match (&listed, fetched) {
+        (None, Some(_)) => {
+            git.run(&["update-ref", "-d", &tracking])?;
+        }
+        (listed, fetched) if *listed != fetched => {
+            return Err(Error::Unfetched {
+                remote: remote.to_owned(),
+                branch: branch.to_owned(),
+            });
+        }
+        _ => {}
     }
-    Ok(())
+    Ok(listed)
 }
 
 // Pushing a branch that tracks another branch would leave that branch, and its pull request, behind.
