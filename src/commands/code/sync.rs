@@ -300,13 +300,12 @@ fn restore(git: &Git, branch: &str, tip: &str, hidden: &Hidden) -> Result<(), Er
             .map(|(path, _)| path)
             .filter(|path| !hidden.left_out.contains(*path)),
     )?;
-    // Aborting checks out the old tip, which files the agent left in its way would block.
-    git.run(&["reset", "--quiet", "--hard"])?;
-    git.run(&["clean", "--quiet", "--force", "-d"])?;
+    // Unlike aborting or switching, a hard reset overwrites files the agent left in its way.
+    // Cleaning waits until the old tip's ignore rules are back.
     if git.in_progress()? == Some(Operation::Rebase) {
-        git.run(&["rebase", "--abort"])?;
+        git.run(&["rebase", "--quit"])?;
     }
-    git.run(&["switch", "--quiet", "--discard-changes", branch])?;
+    git.run(&["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")])?;
     git.run(&["reset", "--quiet", "--hard", tip])?;
     // Forcing twice also removes repositories the agent created.
     git.run(&["clean", "--quiet", "--force", "--force", "-d"])?;

@@ -374,6 +374,19 @@ esac
         }
 
         #[test]
+        fn a_remote_with_two_urls_is_refused_before_the_agent() {
+            let env = Env::new();
+            env.write("feature.rs", "\n");
+            env.git(&["remote", "set-url", "--add", "origin", "/elsewhere"]);
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(
+                stderr.contains("the remote origin has more than one URL"),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["branch", "--show-current"]), "main");
+        }
+
+        #[test]
         fn a_branch_name_already_local_changes_nothing() {
             let env = Env::new();
             env.git(&["branch", "leftover"]);
@@ -391,7 +404,7 @@ esac
             env.git(&["remote", "set-url", "--push", "origin", "/elsewhere"]);
             let stderr = env.fail(&["code", "ship"], &[]);
             assert!(
-                stderr.contains("the remote origin pushes to another URL"),
+                stderr.contains("or pushes to another URL than it fetches from"),
                 "{stderr}"
             );
             assert_eq!(env.git(&["branch", "--show-current"]), "main");
@@ -965,6 +978,55 @@ esac
                 ""
             );
             assert!(!env.work.path().join("ref").exists());
+        }
+
+        #[test]
+        fn ignored_files_survive_a_failed_sync_that_unignores_them() {
+            let env = Env::new();
+            env.write(".gitignore", "cache/\n");
+            env.commit("Ignore.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            fs::create_dir(env.work.path().join("cache")).unwrap();
+            env.write("cache/valuable", "keep\n");
+            env.push_upstream("main", ".gitignore", "");
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.fail(&["code", "sync"], &[("FAKE_RESOLVE", "true")]);
+            env.assert_put_back(&tip);
+            assert_eq!(
+                fs::read_to_string(env.work.path().join("cache/valuable")).unwrap(),
+                "keep\n"
+            );
+        }
+
+        #[test]
+        fn a_file_the_agent_leaves_where_the_old_tip_tracks_one_is_put_back() {
+            let env = Env::new();
+            env.write("old.md", "old\n");
+            env.commit("Old.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            git(clone.path(), &["rm", "--quiet", "old.md"]);
+            git(
+                clone.path(),
+                &["commit", "--quiet", "--message", "Drop old."],
+            );
+            git(clone.path(), &["push", "--quiet", "origin", "main"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.fail(
+                &["code", "sync"],
+                &[("FAKE_RESOLVE", "printf 'agent\\n' > old.md")],
+            );
+            env.assert_put_back(&tip);
+            assert_eq!(
+                fs::read_to_string(env.work.path().join("old.md")).unwrap(),
+                "old\n"
+            );
         }
 
         #[test]

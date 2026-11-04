@@ -123,7 +123,7 @@ pub enum Error {
         pushed: RemoteBranch,
     },
     #[error(
-        "the remote {0} pushes to another URL than it fetches from, which code ship does not support"
+        "the remote {0} has more than one URL, or pushes to another URL than it fetches from, which code ship does not support"
     )]
     SeparatePushUrl(String),
     #[error("gh returned unexpected output: {0}")]

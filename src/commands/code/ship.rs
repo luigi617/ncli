@@ -94,8 +94,9 @@ impl Ship {
         }
         let current = current.map(|(branch, _)| branch);
         // gh would otherwise pick a repository itself, which need not be the one pushed to.
-        let remote_url = git.run(&["remote", "get-url", &into.remote])?;
-        if git.run(&["remote", "get-url", "--push", &into.remote])? != remote_url {
+        let remote_url = git.run(&["remote", "get-url", "--all", &into.remote])?;
+        let push_url = git.run(&["remote", "get-url", "--all", "--push", &into.remote])?;
+        if remote_url.contains('\n') || push_url != remote_url {
             return Err(Error::SeparatePushUrl(into.remote.clone()));
         }
         gh(&git, &["repo", "view", &remote_url, "--json", "url"], None)?;
