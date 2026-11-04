@@ -100,6 +100,9 @@ impl Ship {
             return Err(Error::SeparatePushUrl(into.remote.clone()));
         }
         gh(&git, &["repo", "view", &remote_url, "--json", "url"], None)?;
+        if let Some(branch) = current {
+            check_fetched(&git, &into.remote, branch)?;
+        }
         context.progress("describing the change");
         let (_, shipment) = agent.perform_as::<Shipment>(
             &prompt(repo, &into, &merge_base, current, uncommitted),
@@ -234,6 +237,29 @@ impl Shipment {
         let local = git.optional(&["rev-parse", "--verify", "--quiet", &head])?;
         Ok(local.map(|_| Unusable::Local(self.branch.clone())))
     }
+}
+
+// The push lease would reject the branch anyway, but only after the agent ran and the commit was made.
+fn check_fetched(git: &Git, remote: &str, branch: &str) -> Result<(), Error> {
+    let listed = git.run(&[
+        "ls-remote",
+        "--heads",
+        remote,
+        &format!("refs/heads/{branch}"),
+    ])?;
+    let fetched = git.optional(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("refs/remotes/{remote}/{branch}"),
+    ])?;
+    if listed.split_whitespace().next() != fetched.as_deref() {
+        return Err(Error::Unfetched {
+            remote: remote.to_owned(),
+            branch: branch.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 // Pushing a branch that tracks another branch would leave that branch, and its pull request, behind.

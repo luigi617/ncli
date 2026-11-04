@@ -374,6 +374,26 @@ esac
         }
 
         #[test]
+        fn a_branch_changed_on_the_remote_since_fetching_is_refused_before_the_agent() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feat"]);
+            env.write("feature.rs", "\n");
+            let start = env.commit("Feature.");
+            env.git(&["push", "--quiet", "--set-upstream", "origin", "feat"]);
+            git(
+                env.origin.path(),
+                &["branch", "--quiet", "--delete", "--force", "feat"],
+            );
+            env.write("more.rs", "\n");
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(
+                stderr.contains("feat changed on origin since it was last fetched"),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
+        }
+
+        #[test]
         fn a_remote_with_two_urls_is_refused_before_the_agent() {
             let env = Env::new();
             env.write("feature.rs", "\n");

@@ -126,6 +126,10 @@ pub enum Error {
         "the remote {0} has more than one URL, or pushes to another URL than it fetches from, which code ship does not support"
     )]
     SeparatePushUrl(String),
+    #[error(
+        "{branch} changed on {remote} since it was last fetched; run `git fetch {remote}` and look at it first"
+    )]
+    Unfetched { remote: String, branch: String },
     #[error("gh returned unexpected output: {0}")]
     GhOutput(#[source] serde_json::Error),
     #[error("{agent} left no changes in {} to review: {}", .repo.display(), .report.trim())]
@@ -270,6 +274,7 @@ impl Error {
             | Self::UnusableAnswer { .. }
             | Self::OtherUpstream { .. }
             | Self::SeparatePushUrl(_)
+            | Self::Unfetched { .. }
             | Self::GhOutput(_)
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
