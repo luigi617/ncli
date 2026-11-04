@@ -92,8 +92,8 @@ impl fmt::Display for RemoteBranch {
 
 pub(in crate::commands::code) struct Git<'a> {
     cli: Cli,
-    pub(in crate::commands::code) cwd: &'a Path,
-    pub(in crate::commands::code) cancellation: &'a Cancellation,
+    cwd: &'a Path,
+    cancellation: &'a Cancellation,
 }
 
 impl<'a> Git<'a> {
@@ -105,7 +105,6 @@ impl<'a> Git<'a> {
         }
     }
 
-    // The top level of the work tree around the current directory.
     pub(in crate::commands::code) fn toplevel(
         cancellation: &Cancellation,
     ) -> Result<PathBuf, Error> {
@@ -140,6 +139,14 @@ impl<'a> Git<'a> {
         })
     }
 
+    pub(in crate::commands::code) fn git_path(&self, name: &str) -> Result<PathBuf, ProcessError> {
+        Ok(self.cwd.join(self.run(&["rev-parse", "--git-path", name])?))
+    }
+
+    pub(in crate::commands::code) fn uncommitted(&self) -> Result<bool, ProcessError> {
+        Ok(!self.run(&["status", "--porcelain"])?.is_empty())
+    }
+
     fn empty_tree(&self) -> Result<String, ProcessError> {
         self.run_with_input(&["hash-object", "-t", "tree", "--stdin"], Some(b""))
     }
@@ -157,9 +164,7 @@ impl<'a> Git<'a> {
             .tempdir()
             .map_err(Error::Snapshot)?;
         let index = dir.path().join("index");
-        let real_index = self
-            .cwd
-            .join(self.run(&["rev-parse", "--git-path", "index"])?);
+        let real_index = self.git_path("index")?;
         copy_index(&real_index, &index).map_err(Error::Snapshot)?;
         let git = Git {
             cli: Cli::new(["git"]).env("GIT_INDEX_FILE", &index),

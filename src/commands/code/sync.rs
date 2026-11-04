@@ -7,7 +7,7 @@ use super::review::Git;
 use crate::agent::AgentKind;
 use crate::commands::Context;
 use crate::error::Error;
-use crate::process::ProcessError;
+use crate::process::{Cancellation, ProcessError};
 
 /// Rebase the current branch onto another branch, resolving conflicts with an agent.
 ///
@@ -42,14 +42,14 @@ impl Sync {
         let agent = AgentKind::first_available()?;
         let repo = Git::toplevel(context.cancellation)?;
         let git = Git::new(&repo, context.cancellation);
+        if rebasing(&git)? {
+            return Err(Error::Rebasing(repo));
+        }
         let head = git.head()?;
         let (Some(branch), Some(tip)) = (head.branch.clone(), head.commit.clone()) else {
             return Err(Error::NotOnBranch(Box::new(head)));
         };
-        if rebasing(&git)? {
-            return Err(Error::Rebasing(repo));
-        }
-        if !git.run(&["status", "--porcelain"])?.is_empty() {
+        if git.uncommitted()? {
             return Err(Error::UncommittedChanges(repo));
         }
         let default = git.default_branch()?;
@@ -62,9 +62,9 @@ impl Sync {
         context.progress(&format!("rebasing onto {target}"));
         let result = agent
             .perform(&prompt(&repo, &onto, &target), context.cancellation)
-            .and_then(|performed| match unsynced(&git, &branch, &onto)? {
+            .and_then(|performed| match unsynced(&git, &branch, &onto, &tip)? {
                 None => Ok(()),
-                Some(problem) => Err(Error::Unsynced {
+                Some(problem) => Err(Error::RebaseUnfinished {
                     agent: agent.name.clone(),
                     problem,
                     report: performed.report,
@@ -74,6 +74,9 @@ impl Sync {
             return Ok(format!("Rebased onto {target}."));
         };
         let source = Box::new(source);
+        // An interruption cancels the run's processes, and the branch must still be put back.
+        let uncancelled = Cancellation::default();
+        let git = Git::new(&repo, &uncancelled);
         Err(match restore(&git, &branch, &tip) {
             Ok(()) => Error::NotSynced {
                 target,
@@ -92,18 +95,14 @@ impl Sync {
 
 fn rebasing(git: &Git) -> Result<bool, ProcessError> {
     for dir in ["rebase-merge", "rebase-apply"] {
-        if git
-            .cwd
-            .join(git.run(&["rev-parse", "--git-path", dir])?)
-            .exists()
-        {
+        if git.git_path(dir)?.exists() {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn unsynced(git: &Git, branch: &str, onto: &str) -> Result<Option<Unsynced>, Error> {
+fn unsynced(git: &Git, branch: &str, onto: &str, tip: &str) -> Result<Option<Unsynced>, Error> {
     if rebasing(git)? {
         return Ok(Some(Unsynced::Unfinished));
     }
@@ -120,21 +119,34 @@ fn unsynced(git: &Git, branch: &str, onto: &str) -> Result<Option<Unsynced>, Err
     {
         return Ok(Some(Unsynced::Merges));
     }
-    if !git.run(&["status", "--porcelain"])?.is_empty() {
+    if git.uncommitted()? {
         return Ok(Some(Unsynced::Uncommitted));
     }
-    // Git finds markers in the lines the branch adds, at the size the attributes give.
-    let checked = match git.run(&["diff", "--check", onto, "HEAD"]) {
-        Err(error @ ProcessError::Exit { code: 2, .. }) => error.stdout().to_owned(),
-        checked => checked?,
-    };
-    let mut marked: Vec<&str> = checked
-        .lines()
-        .filter(|line| line.ends_with("leftover conflict marker"))
-        .filter_map(|line| line.rsplitn(3, ':').nth(2))
+    // A leftover marker is new against both sides, unlike a marker-like line that the branch or
+    // the target already had.
+    let against_tip = markers(git, tip)?;
+    let against_onto = markers(git, onto)?;
+    let mut marked: Vec<&str> = against_onto
+        .iter()
+        .filter(|&location| against_tip.contains(location))
+        .filter_map(|location| location.rsplit_once(':'))
+        .map(|(path, _)| path)
         .collect();
     marked.dedup();
     Ok((!marked.is_empty()).then(|| Unsynced::Markers(marked.join(", "))))
+}
+
+// Git finds markers in the lines HEAD adds, at the size the attributes give.
+fn markers(git: &Git, from: &str) -> Result<Vec<String>, ProcessError> {
+    let checked = match git.run(&["diff", "--check", from, "HEAD"]) {
+        Err(error @ ProcessError::Exit { code: 2, .. }) => error.stdout().to_owned(),
+        checked => checked?,
+    };
+    Ok(checked
+        .lines()
+        .filter_map(|line| line.strip_suffix(": leftover conflict marker"))
+        .map(str::to_owned)
+        .collect())
 }
 
 // A hard reset, unlike aborting, overwrites files the agent left in the way.
@@ -153,7 +165,8 @@ fn prompt(repo: &Path, onto: &str, target: &str) -> String {
         "In the repository at `{}`, rebase the current branch onto commit {onto}, which is \
          {target}, with `git rebase {onto}`. Resolve each conflict so that both sides' changes \
          are kept as they were meant, reading the commit being applied with `git show \
-         REBASE_HEAD` when that helps, stage the resolution, and continue until the rebase is \
+         REBASE_HEAD` when that helps, stage the resolution, and continue with \
+         `GIT_EDITOR=true git rebase --continue`, so that no editor opens, until the rebase is \
          done. Do not merge, push, or switch branches, and leave nothing uncommitted.",
         repo.display()
     )

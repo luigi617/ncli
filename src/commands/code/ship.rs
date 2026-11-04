@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -10,7 +9,9 @@ use super::review::Git;
 use crate::agent::{AgentKind, task_schema};
 use crate::commands::Context;
 use crate::error::Error;
-use crate::process::{self, Cli, ProcessError};
+use crate::process::{self, Cancellation, Cli, ProcessError};
+
+const GH: &str = "gh";
 
 static SCHEMA: LazyLock<String> = LazyLock::new(|| task_schema(r#"{"url": {"type": "string"}}"#));
 
@@ -52,7 +53,7 @@ struct PullRequest {
 
 impl Ship {
     pub fn run(&self, context: &Context) -> Result<String, Error> {
-        process::require_executables([OsStr::new("gh")])?;
+        process::require_executables([GH.as_ref()])?;
         let agent = AgentKind::first_available()?;
         let repo = Git::toplevel(context.cancellation)?;
         let git = Git::new(&repo, context.cancellation);
@@ -63,7 +64,7 @@ impl Ship {
         context.progress("shipping");
         let (performed, shipped) =
             agent.perform_as::<Shipped>(&prompt(&repo, &into), &SCHEMA, context.cancellation)?;
-        match unshipped(&git, &shipped.url, &into)? {
+        match unshipped(&git, &repo, context.cancellation, &shipped.url, &into)? {
             None => Ok(shipped.url),
             Some(problem) => Err(Error::NotShipped {
                 agent: agent.name.clone(),
@@ -76,12 +77,19 @@ impl Ship {
     }
 }
 
-fn unshipped(git: &Git, url: &str, into: &str) -> Result<Option<Unshipped>, Error> {
-    if !git.run(&["status", "--porcelain"])?.is_empty() {
+fn unshipped(
+    git: &Git,
+    repo: &Path,
+    cancellation: &Cancellation,
+    url: &str,
+    into: &str,
+) -> Result<Option<Unshipped>, Error> {
+    if git.uncommitted()? {
         return Ok(Some(Unshipped::Uncommitted));
     }
     let viewed = gh(
-        git,
+        repo,
+        cancellation,
         &["pr", "view", url, "--json", "state,baseRefName,headRefOid"],
     )?;
     let pull_request: PullRequest = serde_json::from_str(&viewed).map_err(Error::GhOutput)?;
@@ -100,9 +108,9 @@ fn unshipped(git: &Git, url: &str, into: &str) -> Result<Option<Unshipped>, Erro
     })
 }
 
-fn gh(git: &Git, args: &[&str]) -> Result<String, ProcessError> {
+fn gh(repo: &Path, cancellation: &Cancellation, args: &[&str]) -> Result<String, ProcessError> {
     let args: Vec<_> = args.iter().map(Into::into).collect();
-    Cli::new(["gh"]).run(&args, None, Some(git.cwd), git.cancellation)
+    Cli::new([GH]).run(&args, None, Some(repo), cancellation)
 }
 
 fn prompt(repo: &Path, into: &str) -> String {

@@ -4,7 +4,9 @@ mod common;
 #[cfg(unix)]
 mod binary {
     use std::fs;
-    use std::process::Output;
+    use std::process::{Command, Output, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use crate::common::{git, ncli, script};
     use ncli::error::Error;
@@ -80,8 +82,9 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
             env
         }
 
-        fn ncli(&self, args: &[&str], vars: &[(&str, &str)]) -> Output {
-            let output = ncli(self.state.path())
+        fn command(&self, args: &[&str], vars: &[(&str, &str)]) -> Command {
+            let mut command = ncli(self.state.path());
+            command
                 .args(args)
                 .current_dir(self.work.path())
                 .env(
@@ -95,9 +98,12 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
                 .env("GIT_AUTHOR_EMAIL", "ncli@example.com")
                 .env("GIT_COMMITTER_NAME", "ncli")
                 .env("GIT_COMMITTER_EMAIL", "ncli@example.com")
-                .envs(vars.iter().copied())
-                .output()
-                .unwrap();
+                .envs(vars.iter().copied());
+            command
+        }
+
+        fn ncli(&self, args: &[&str], vars: &[(&str, &str)]) -> Output {
+            let output = self.command(args, vars).output().unwrap();
             assert_ne!(output.status.code(), Some(Error::USAGE.into()));
             output
         }
@@ -327,6 +333,53 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
         }
 
         #[test]
+        fn a_branch_left_behind_the_target_is_put_back() {
+            put_back(
+                &[("FAKE_AFTER", "git reset --quiet --hard ORIG_HEAD")],
+                "not on top of the commit",
+            );
+        }
+
+        #[test]
+        fn an_interrupted_rebase_is_put_back() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let started = env.log.path().join("started");
+            let wait = format!("touch '{}'; sleep 10", started.display());
+            let vars = [("FAKE_STOP", "1"), ("FAKE_AFTER", wait.as_str())];
+            let mut child = env
+                .command(&["code", "sync"], &vars)
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !started.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the agent never stopped mid-rebase"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+            child.wait().unwrap();
+            env.assert_put_back(&tip);
+        }
+
+        #[test]
+        fn a_marker_like_line_the_branch_adds_is_kept() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write("notes.md", "License\n=======\n");
+            env.commit("Feature.");
+            env.push_upstream("main", "README.md", "upstream\n");
+            assert_eq!(
+                env.succeed(&["code", "sync"], &[]),
+                "Rebased onto origin/main.\n"
+            );
+        }
+
+        #[test]
         fn uncommitted_changes_left_by_the_agent_are_put_back() {
             put_back(
                 &[("FAKE_AFTER", "printf 'x\\n' > stray.md")],
@@ -358,6 +411,17 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
             env.git(&["switch", "--quiet", "--detach"]);
             let stderr = env.fail(&["code", "sync"], &[]);
             assert!(stderr.contains("not a branch to rebase"), "{stderr}");
+            assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
+        fn a_rebase_in_progress_is_refused() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.git(&["-c", "sequence.editor=echo break >", "rebase", "-i", "HEAD"]);
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(stderr.contains("a rebase is in progress"), "{stderr}");
+            assert_eq!(env.agent_calls(), 0);
         }
     }
 }

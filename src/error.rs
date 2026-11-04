@@ -90,7 +90,7 @@ pub enum Error {
     #[error("{} has uncommitted changes or untracked files; commit, stash, or remove them first", .0.display())]
     UncommittedChanges(PathBuf),
     #[error("{agent} did not finish the rebase: {problem}\n{}", .report.trim())]
-    Unsynced {
+    RebaseUnfinished {
         agent: String,
         problem: Unsynced,
         report: String,
@@ -245,7 +245,7 @@ impl Error {
             | Self::NotOnBranch(_)
             | Self::Rebasing(_)
             | Self::UncommittedChanges(_)
-            | Self::Unsynced { .. }
+            | Self::RebaseUnfinished { .. }
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
             | Self::NothingWritten(_)
