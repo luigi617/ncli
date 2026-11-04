@@ -290,8 +290,8 @@ fn marker_size(git: &Git, path: &str) -> Result<usize, ProcessError> {
 }
 
 // The lines in the path's blobs at these index stages that could be conflict markers.
-// How many times each line that could be a conflict marker appears in the path's blob at the
-// stage that has it most, of these index stages.
+// How many times each line that could be a conflict marker appears in the path's blobs at these
+// index stages, together. A resolution keeps at most the copies both sides hold together.
 fn marker_lines(
     git: &Git,
     path: &str,
@@ -299,9 +299,8 @@ fn marker_lines(
     stages: &[u8],
 ) -> Result<HashMap<String, usize>, ProcessError> {
     let run = |line: &str, marker| line.bytes().take_while(|&byte| byte == marker).count();
-    let mut most = HashMap::new();
+    let mut counts = HashMap::new();
     for stage in stages {
-        let mut counts = HashMap::new();
         for line in blob(git, &format!(":{stage}:{path}"))?
             .lines()
             .filter(|line| {
@@ -313,12 +312,8 @@ fn marker_lines(
         {
             *counts.entry(line.to_owned()).or_insert(0) += 1;
         }
-        for (line, count) in counts {
-            let entry = most.entry(line).or_insert(0);
-            *entry = count.max(*entry);
-        }
     }
-    Ok(most)
+    Ok(counts)
 }
 
 fn restore(git: &Git, branch: &str, tip: &str, hidden: &Hidden) -> Result<(), Error> {

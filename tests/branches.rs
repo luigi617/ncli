@@ -1051,11 +1051,11 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
         }
 
         #[test]
-        fn a_marker_line_repeated_beyond_its_sides_is_undone() {
+        fn a_marker_line_repeated_beyond_both_sides_is_undone() {
             let env = Env::new();
             let tip = env.feature(&["Title\n=======\nfeature\n"]);
             env.push_upstream("main", "README.md", "Title\n=======\nupstream\n");
-            let resolve = "printf 'Title\\n=======\\nfeature\\n=======\\nupstream\\n' > README.md && \
+            let resolve = "printf '=======\\nfeature\\n=======\\nupstream\\n=======\\n' > README.md && \
                  git add README.md";
             let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
             assert!(
@@ -1063,6 +1063,20 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
                 "{stderr}"
             );
             env.assert_put_back(&tip);
+        }
+
+        #[test]
+        fn marker_lines_from_both_sides_may_all_be_kept() {
+            let env = Env::new();
+            env.feature(&["Install\n=======\n"]);
+            env.push_upstream("main", "README.md", "Testing\n=======\n");
+            let keep = "printf 'Install\\n=======\\nTesting\\n=======\\n' > README.md && \
+                 git add README.md";
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", keep)]);
+            assert_eq!(
+                env.read("README.md"),
+                "Install\n=======\nTesting\n=======\n"
+            );
         }
 
         #[test]
