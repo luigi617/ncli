@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -221,7 +221,11 @@ fn resolve(
     }
     let mut marked = Vec::new();
     for (path, (size, sides)) in conflicted.iter().zip(&sides) {
-        if !marker_lines(git, path, *size, &[0])?.is_subset(sides) {
+        let resolved = marker_lines(git, path, *size, &[0])?;
+        if resolved
+            .iter()
+            .any(|(line, count)| sides.get(line).is_none_or(|sides| count > sides))
+        {
             marked.push(path.as_str());
         }
     }
@@ -286,28 +290,35 @@ fn marker_size(git: &Git, path: &str) -> Result<usize, ProcessError> {
 }
 
 // The lines in the path's blobs at these index stages that could be conflict markers.
+// How many times each line that could be a conflict marker appears in the path's blob at the
+// stage that has it most, of these index stages.
 fn marker_lines(
     git: &Git,
     path: &str,
     size: usize,
     stages: &[u8],
-) -> Result<HashSet<String>, ProcessError> {
+) -> Result<HashMap<String, usize>, ProcessError> {
     let run = |line: &str, marker| line.bytes().take_while(|&byte| byte == marker).count();
-    let mut lines = HashSet::new();
+    let mut most = HashMap::new();
     for stage in stages {
-        lines.extend(
-            blob(git, &format!(":{stage}:{path}"))?
-                .lines()
-                .filter(|line| {
-                    (line.len() == size && run(line, b'=') == size)
-                        || [b'<', b'|', b'>']
-                            .into_iter()
-                            .any(|marker| run(line, marker) >= size)
-                })
-                .map(str::to_owned),
-        );
+        let mut counts = HashMap::new();
+        for line in blob(git, &format!(":{stage}:{path}"))?
+            .lines()
+            .filter(|line| {
+                (line.len() == size && run(line, b'=') == size)
+                    || [b'<', b'|', b'>']
+                        .into_iter()
+                        .any(|marker| run(line, marker) >= size)
+            })
+        {
+            *counts.entry(line.to_owned()).or_insert(0) += 1;
+        }
+        for (line, count) in counts {
+            let entry = most.entry(line).or_insert(0);
+            *entry = count.max(*entry);
+        }
     }
-    Ok(lines)
+    Ok(most)
 }
 
 fn restore(git: &Git, branch: &str, tip: &str, hidden: &Hidden) -> Result<(), Error> {

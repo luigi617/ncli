@@ -1051,6 +1051,21 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
         }
 
         #[test]
+        fn a_marker_line_repeated_beyond_its_sides_is_undone() {
+            let env = Env::new();
+            let tip = env.feature(&["Title\n=======\nfeature\n"]);
+            env.push_upstream("main", "README.md", "Title\n=======\nupstream\n");
+            let resolve = "printf 'Title\\n=======\\nfeature\\n=======\\nupstream\\n' > README.md && \
+                 git add README.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(
+                stderr.contains("the agent left conflict markers in README.md"),
+                "{stderr}"
+            );
+            env.assert_put_back(&tip);
+        }
+
+        #[test]
         fn markers_on_a_side_of_a_renamed_file_are_kept() {
             let env = Env::new();
             let text = "Text.\n".repeat(10);
