@@ -20,8 +20,9 @@ const MARKERS: [&str; 3] = ["<<<<<<<", "|||||||", ">>>>>>>"];
 /// The working tree must be clean, including files marked assume-unchanged or skip-worktree. The
 /// agent may change only the conflicted files: any change git sees to another tracked path,
 /// anything else staged, or a new untracked file fails the sync, while ignored files it creates
-/// are left alone. If the rebase cannot be finished, the branch, index, and working tree are put
-/// back as they were. Repositories with submodules are not supported.
+/// are left alone. If the rebase cannot be finished, the branch, index, and tracked and untracked
+/// files are put back as they were; ignored files are left to git, which overwrites one that a
+/// commit being applied tracks. Repositories with submodules are not supported.
 #[derive(Debug, Args)]
 pub struct Sync {
     /// Branch to rebase onto [default: the remote's default branch]

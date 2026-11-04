@@ -122,6 +122,10 @@ pub enum Error {
         upstream: RemoteBranch,
         pushed: RemoteBranch,
     },
+    #[error(
+        "the remote {0} pushes to another URL than it fetches from, which code ship does not support"
+    )]
+    SeparatePushUrl(String),
     #[error("gh returned unexpected output: {0}")]
     GhOutput(#[source] serde_json::Error),
     #[error("{agent} left no changes in {} to review: {}", .repo.display(), .report.trim())]
@@ -265,6 +269,7 @@ impl Error {
             | Self::ChangedWhileDescribing { .. }
             | Self::UnusableAnswer { .. }
             | Self::OtherUpstream { .. }
+            | Self::SeparatePushUrl(_)
             | Self::GhOutput(_)
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }

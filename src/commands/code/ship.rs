@@ -49,6 +49,8 @@ pub enum Unusable {
     Branch(String),
     #[error("`{branch}` is already a branch on {remote}")]
     Taken { branch: String, remote: String },
+    #[error("`{0}` is already a local branch")]
+    Local(String),
 }
 
 impl Ship {
@@ -93,6 +95,9 @@ impl Ship {
         let current = current.map(|(branch, _)| branch);
         // gh would otherwise pick a repository itself, which need not be the one pushed to.
         let remote_url = git.run(&["remote", "get-url", &into.remote])?;
+        if git.run(&["remote", "get-url", "--push", &into.remote])? != remote_url {
+            return Err(Error::SeparatePushUrl(into.remote.clone()));
+        }
         gh(&git, &["repo", "view", &remote_url, "--json", "url"], None)?;
         context.progress("describing the change");
         let (_, shipment) = agent.perform_as::<Shipment>(
@@ -216,13 +221,17 @@ impl Shipment {
         // Pushing to a branch that exists would add the work to someone else's branch.
         let head = format!("refs/heads/{}", self.branch);
         match git.run(&["ls-remote", "--exit-code", "--heads", remote, &head]) {
-            Err(ProcessError::Exit { code: 2, .. }) => Ok(None),
-            Ok(_) => Ok(Some(Unusable::Taken {
-                branch: self.branch.clone(),
-                remote: remote.to_owned(),
-            })),
-            Err(error) => Err(error),
+            Err(ProcessError::Exit { code: 2, .. }) => {}
+            Ok(_) => {
+                return Ok(Some(Unusable::Taken {
+                    branch: self.branch.clone(),
+                    remote: remote.to_owned(),
+                }));
+            }
+            Err(error) => return Err(error),
         }
+        let local = git.optional(&["rev-parse", "--verify", "--quiet", &head])?;
+        Ok(local.map(|_| Unusable::Local(self.branch.clone())))
     }
 }
 

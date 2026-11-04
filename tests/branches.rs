@@ -316,7 +316,10 @@ esac
         }
 
         fn unusable(shipment: &str, expected: &str) {
-            let env = Env::new();
+            unusable_in(Env::new(), shipment, expected);
+        }
+
+        fn unusable_in(env: Env, shipment: &str, expected: &str) {
             let start = env.git(&["rev-parse", "HEAD"]);
             env.write("feature.rs", "\n");
             let shipment =
@@ -368,6 +371,30 @@ esac
                 r#""branch": "main", "commit_message": "M.", "title": "T""#,
                 "`main` is already a branch on origin",
             );
+        }
+
+        #[test]
+        fn a_branch_name_already_local_changes_nothing() {
+            let env = Env::new();
+            env.git(&["branch", "leftover"]);
+            unusable_in(
+                env,
+                r#""branch": "leftover", "commit_message": "M.", "title": "T""#,
+                "`leftover` is already a local branch",
+            );
+        }
+
+        #[test]
+        fn a_remote_that_pushes_elsewhere_is_refused_before_the_agent() {
+            let env = Env::new();
+            env.write("feature.rs", "\n");
+            env.git(&["remote", "set-url", "--push", "origin", "/elsewhere"]);
+            let stderr = env.fail(&["code", "ship"], &[]);
+            assert!(
+                stderr.contains("the remote origin pushes to another URL"),
+                "{stderr}"
+            );
+            assert_eq!(env.git(&["branch", "--show-current"]), "main");
         }
 
         #[test]
