@@ -44,9 +44,12 @@ esac
 "#;
 
     const FAKE_SSH: &str = r#"#!/bin/sh
-[ "$1" = -G ] && { echo "hostname github.com"; exit; }
+if [ "$1" = -G ]; then
+    [ -z "$FAKE_SSH_NO_CONFIG" ] || exit 255
+    echo "hostname github.com"; exit
+fi
 for last; do :; done
-cd "$FAKE_SSH_ROOT" && exec sh -c "$last"
+cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
 "#;
 
     struct Env {
@@ -438,8 +441,9 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$last"
             assert_eq!(env.agent_calls(), 1);
         }
 
-        #[test]
-        fn an_ssh_host_alias_is_resolved_for_gh() {
+        // Ships through a fake ssh from a remote whose fetch and push URLs spell the alias
+        // `work` differently, and returns the repositories gh was asked about.
+        fn ship_over_ssh(vars: &[(&str, &str)]) -> String {
             let env = Env::new();
             let root = TempDir::new().unwrap();
             fs::create_dir(root.path().join("owner")).unwrap();
@@ -447,18 +451,54 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$last"
                 .unwrap();
             script(env.bin.path(), "ssh", FAKE_SSH);
             env.git(&["remote", "set-url", "origin", "git@work:owner/repo.git"]);
+            env.git(&[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "ssh://git@work/owner/repo.git",
+            ]);
             env.write("feature.rs", "\n");
-            env.succeed(
-                &["code", "ship"],
-                &[("FAKE_SSH_ROOT", root.path().to_str().unwrap())],
-            );
-            let calls = env.logged("gh.log");
+            let root = root.path().to_str().unwrap();
+            let vars: Vec<_> = [("FAKE_SSH_ROOT", root)]
+                .into_iter()
+                .chain(vars.iter().copied())
+                .collect();
+            env.succeed(&["code", "ship"], &vars);
+            env.logged("gh.log")
+        }
+
+        #[test]
+        fn an_ssh_host_alias_is_resolved_for_gh() {
+            let calls = ship_over_ssh(&[]);
+            assert_eq!(calls.lines().count(), 3, "{calls}");
             assert!(
                 calls
                     .lines()
-                    .all(|call| call.contains("github.com/owner/repo ")
-                        || call.ends_with("github.com/owner/repo")),
+                    .all(|call| call.contains("github.com/owner/repo")),
                 "{calls}"
+            );
+        }
+
+        #[test]
+        fn an_ssh_host_alias_ssh_cannot_resolve_is_used_as_written() {
+            let calls = ship_over_ssh(&[("FAKE_SSH_NO_CONFIG", "1")]);
+            assert!(
+                calls.lines().all(|call| call.contains("work/owner/repo")),
+                "{calls}"
+            );
+        }
+
+        #[test]
+        fn new_files_outside_a_sparse_checkout_are_shipped() {
+            let env = Env::new();
+            env.git(&["sparse-checkout", "set", "--no-cone", "/README.md"]);
+            env.write("new.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            let branch = env.git(&["branch", "--show-current"]);
+            assert_eq!(
+                git(env.origin.path(), &["show", &format!("{branch}:new.rs")]),
+                ""
             );
         }
 

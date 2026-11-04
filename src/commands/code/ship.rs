@@ -96,10 +96,10 @@ impl Ship {
         // gh would otherwise pick a repository itself, which need not be the one pushed to.
         let remote_url = git.run(&["remote", "get-url", "--all", &into.remote])?;
         let push_url = git.run(&["remote", "get-url", "--all", "--push", &into.remote])?;
-        if remote_url.contains('\n') || push_url != remote_url {
+        let repo_name = gh_repo(&git, &remote_url)?;
+        if remote_url.contains('\n') || gh_repo(&git, &push_url)? != repo_name {
             return Err(Error::SeparatePushUrl(into.remote.clone()));
         }
-        let repo_name = gh_repo(&git, &remote_url)?;
         gh(&git, &["repo", "view", &repo_name, "--json", "url"], None)?;
         if let Some(branch) = current {
             let pushed = check_fetched(&git, &into.remote, branch)?;
@@ -137,7 +137,7 @@ impl Ship {
             }
         };
         if uncommitted {
-            git.run(&["add", "--all"])?;
+            git.run(&["add", "--all", "--sparse"])?;
             git.run_with_input(
                 &["commit", "--quiet", "--file=-"],
                 Some(shipment.commit_message.as_bytes()),
@@ -327,25 +327,40 @@ fn check_upstream(git: &Git, branch: &str, into: &Upstream, default: &str) -> Re
     })
 }
 
-// The repository gh should work on. gh does not read ssh config, so the host of an ssh URL, which
-// may be an alias such as one per account, is resolved the way ssh resolves it.
+// The repository gh should work on, as host/owner/name for a URL, so that spellings of one
+// repository agree. gh does not read ssh config, so the host of an ssh URL, which may be an alias
+// such as one per account, is resolved the way ssh resolves it, when ssh can.
 fn gh_repo(git: &Git, url: &str) -> Result<String, ProcessError> {
-    let (authority, path) = match url.strip_prefix("ssh://") {
-        Some(rest) => rest.split_once('/').unwrap_or((rest, "")),
-        None if !url.contains("://") => match url.split_once(':') {
-            Some((host, path)) if host.len() > 1 && !host.contains(['/', '\\']) => (host, path),
+    let (scheme, authority, path) = match url.split_once("://") {
+        Some(("file", _)) => return Ok(url.to_owned()),
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+            (scheme, authority, path)
+        }
+        None => match url.split_once(':') {
+            Some((host, path)) if host.len() > 1 && !host.contains(['/', '\\']) => {
+                ("ssh", host, path)
+            }
             _ => return Ok(url.to_owned()),
         },
-        None => return Ok(url.to_owned()),
     };
     let host = authority.rsplit('@').next().unwrap_or(authority);
-    let host = host.split(':').next().unwrap_or(host);
-    let args = ["-G", host].map(OsString::from);
-    let config = Cli::new(["ssh"]).run(&args, None, Some(git.cwd), git.cancellation)?;
-    let host = config
-        .lines()
-        .find_map(|line| line.strip_prefix("hostname "))
-        .unwrap_or(host);
+    let mut host = host.split(':').next().unwrap_or(host).to_owned();
+    if scheme.contains("ssh") {
+        let args = ["-G", host.as_str()].map(OsString::from);
+        match Cli::new(["ssh"]).run(&args, None, Some(git.cwd), git.cancellation) {
+            Ok(config) => {
+                if let Some(name) = config
+                    .lines()
+                    .find_map(|line| line.strip_prefix("hostname "))
+                {
+                    host = name.to_owned();
+                }
+            }
+            Err(ProcessError::Spawn { .. } | ProcessError::Exit { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
     let path = path.trim_start_matches('/');
     Ok(format!(
         "{host}/{}",
