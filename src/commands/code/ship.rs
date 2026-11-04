@@ -101,12 +101,13 @@ impl Ship {
             return Err(Error::SeparatePushUrl(into.remote.clone()));
         }
         gh(&git, &["repo", "view", &repo_name, "--json", "url"], None)?;
-        if let Some(branch) = current {
-            let pushed = check_fetched(&git, &into.remote, branch)?;
-            if !uncommitted && pushed == head.commit {
-                if let Some(url) = open_pull_request(&git, branch, &into.branch, &repo_name)? {
-                    return Ok(url);
-                }
+        let pushed = match current {
+            Some(branch) => remote_tip(&git, &into.remote, branch)?,
+            None => None,
+        };
+        if let Some(branch) = current.filter(|_| !uncommitted && pushed == head.commit) {
+            if let Some(url) = open_pull_request(&git, branch, &into.branch, &repo_name)? {
+                return Ok(url);
             }
         }
         context.progress("describing the change");
@@ -146,16 +147,16 @@ impl Ship {
         context.progress(&format!("pushing {branch}"));
         // A full refspec, so push config cannot send the branch to another remote branch.
         let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-        // A new branch must not exist on the remote, whatever a leftover tracking ref says.
-        let lease = match current {
-            Some(_) => "--force-with-lease".to_owned(),
-            None => format!("--force-with-lease=refs/heads/{branch}:"),
-        };
+        // The remote branch must still be where it was checked to be, or absent for a new one,
+        // whatever tracking refs say.
+        let lease = format!(
+            "--force-with-lease=refs/heads/{branch}:{}",
+            pushed.as_deref().unwrap_or_default()
+        );
         git.run(&[
             "push",
             "--quiet",
             &lease,
-            "--force-if-includes",
             "--set-upstream",
             &into.remote,
             &refspec,
@@ -262,49 +263,45 @@ fn open_pull_request(
         .map(|pull_request| pull_request.url))
 }
 
-// The commit the branch is at on the remote. The push lease would reject a branch changed there
-// anyway, but only after the agent ran and the commit was made. One deleted there, as after a
-// merge, holds nothing to keep, so its stale tracking ref is dropped.
-fn check_fetched(git: &Git, remote: &str, branch: &str) -> Result<Option<String>, Error> {
-    let tracking = format!("refs/remotes/{remote}/{branch}");
+// The commit the branch is at on the remote, which pushing may replace only if the branch has
+// had it, as an ancestor or as an earlier tip before a rebase. Checked before the agent runs, so
+// that work someone else pushed stops the ship before anything is described or committed.
+fn remote_tip(git: &Git, remote: &str, branch: &str) -> Result<Option<String>, Error> {
     let listed = git.run(&[
         "ls-remote",
         "--heads",
         remote,
         &format!("refs/heads/{branch}"),
     ])?;
-    let listed = listed.split_whitespace().next().map(str::to_owned);
-    let fetched = git.optional(&["rev-parse", "--verify", "--quiet", &tracking])?;
-    match (&listed, fetched) {
-        (None, Some(_)) => {
-            git.run(&["update-ref", "-d", &tracking])?;
-        }
-        // A single-branch or shallow clone keeps no tracking ref, so only a fast-forward is safe.
-        (Some(listed), None) if fast_forwards(git, listed)? => {
-            git.run(&["update-ref", &tracking, listed])?;
-        }
-        (listed, fetched) if *listed != fetched => {
-            return Err(Error::Unfetched {
-                remote: remote.to_owned(),
-                branch: branch.to_owned(),
-            });
-        }
-        _ => {}
+    let Some(listed) = listed.split_whitespace().next() else {
+        return Ok(None);
+    };
+    if !had(git, branch, listed)? {
+        return Err(Error::Unfetched {
+            remote: remote.to_owned(),
+            branch: branch.to_owned(),
+        });
     }
-    Ok(listed)
+    Ok(Some(listed.to_owned()))
 }
 
-fn fast_forwards(git: &Git, from: &str) -> Result<bool, ProcessError> {
-    let commit = format!("{from}^{{commit}}");
+fn had(git: &Git, branch: &str, commit: &str) -> Result<bool, ProcessError> {
+    let known = format!("{commit}^{{commit}}");
     if git
-        .optional(&["rev-parse", "--verify", "--quiet", &commit])?
+        .optional(&["rev-parse", "--verify", "--quiet", &known])?
         .is_none()
     {
         return Ok(false);
     }
-    Ok(git
-        .optional(&["merge-base", "--is-ancestor", from, "HEAD"])?
-        .is_some())
+    if git
+        .optional(&["merge-base", "--is-ancestor", commit, "HEAD"])?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let reflog = format!("refs/heads/{branch}");
+    let tips = git.run(&["log", "--walk-reflogs", "--format=%H", &reflog])?;
+    Ok(tips.lines().any(|tip| tip == commit))
 }
 
 // Pushing a branch that tracks another branch would leave that branch, and its pull request, behind.

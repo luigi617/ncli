@@ -127,7 +127,7 @@ pub enum Error {
     )]
     SeparatePushUrl(String),
     #[error(
-        "{branch} changed on {remote} since it was last fetched; run `git fetch {remote}` and look at it first"
+        "{branch} on {remote} has commits this branch never had; fetch them with `git fetch {remote}` and look at them first"
     )]
     Unfetched { remote: String, branch: String },
     #[error("gh returned unexpected output: {0}")]

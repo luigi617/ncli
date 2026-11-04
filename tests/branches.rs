@@ -389,14 +389,24 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
             env.write("feature.rs", "\n");
             let start = env.commit("Feature.");
             env.git(&["push", "--quiet", "--set-upstream", "origin", "feat"]);
-            let main = env.origin("main");
-            git(env.origin.path(), &["update-ref", "refs/heads/feat", &main]);
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            git(clone.path(), &["switch", "--quiet", "feat"]);
+            git(
+                clone.path(),
+                &["commit", "--quiet", "--allow-empty", "--message", "Theirs."],
+            );
+            git(clone.path(), &["push", "--quiet", "origin", "feat"]);
             env.write("more.rs", "\n");
             let stderr = env.fail(&["code", "ship"], &[]);
             assert!(
-                stderr.contains("feat changed on origin since it was last fetched"),
+                stderr.contains("feat on origin has commits this branch never had"),
                 "{stderr}"
             );
+            assert_eq!(env.agent_calls(), 0);
             assert_eq!(env.git(&["rev-parse", "HEAD"]), start);
         }
 
@@ -435,6 +445,40 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$(printf '%s' "$last" | sed "s#'/#'#")"
             env.commit("Feature.");
             env.git(&["push", "--quiet", "origin", "feat"]);
             env.git(&["update-ref", "-d", "refs/remotes/origin/feat"]);
+            env.write("more.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.origin("feat"), env.git(&["rev-parse", "HEAD"]));
+        }
+
+        #[test]
+        fn a_single_branch_clone_ships_to_its_branch_again() {
+            let env = Env::new();
+            env.git(&[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/main:refs/remotes/origin/main",
+            ]);
+            env.write("feature.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            env.write("more.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.origin("add-feature"), env.git(&["rev-parse", "HEAD"]));
+        }
+
+        #[test]
+        fn a_branch_rebased_since_it_was_pushed_is_shipped_over_its_old_tip() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feat"]);
+            env.write("feature.rs", "\n");
+            env.commit("Feature.");
+            env.git(&["push", "--quiet", "--set-upstream", "origin", "feat"]);
+            env.git(&[
+                "commit",
+                "--quiet",
+                "--amend",
+                "--message",
+                "Feature, reworded.",
+            ]);
             env.write("more.rs", "\n");
             env.succeed(&["code", "ship"], &[]);
             assert_eq!(env.origin("feat"), env.git(&["rev-parse", "HEAD"]));
