@@ -171,10 +171,14 @@ fn resolve(
 ) -> Result<(), Error> {
     let before = git.index()?;
     let before_worktree = worktree(git)?;
+    // Read before the agent runs, since git wrote the markers at the size in effect then.
     let sides = conflicted
         .iter()
-        .map(|path| marker_lines(git, path, &[2, 3]))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|path| {
+            let size = marker_size(git, path)?;
+            Ok((size, marker_lines(git, path, size, &[2, 3])?))
+        })
+        .collect::<Result<Vec<_>, ProcessError>>()?;
     context.progress(&format!(
         "resolving {}",
         count(conflicted.len(), "conflict")
@@ -216,8 +220,8 @@ fn resolve(
         return Err(Unresolved::Outside(outside.join(", ")).into());
     }
     let mut marked = Vec::new();
-    for (path, sides) in conflicted.iter().zip(&sides) {
-        if !marker_lines(git, path, &[0])?.is_subset(sides) {
+    for (path, (size, sides)) in conflicted.iter().zip(&sides) {
+        if !marker_lines(git, path, *size, &[0])?.is_subset(sides) {
             marked.push(path.as_str());
         }
     }
@@ -270,16 +274,23 @@ fn blob(git: &Git, rev: &str) -> Result<String, ProcessError> {
     })
 }
 
-// The lines in the path's blobs at these index stages that could be conflict markers, at the
-// size the path's attributes give them.
-fn marker_lines(git: &Git, path: &str, stages: &[u8]) -> Result<HashSet<String>, ProcessError> {
-    let size = git
+fn marker_size(git: &Git, path: &str) -> Result<usize, ProcessError> {
+    Ok(git
         .run(&["check-attr", "-z", "conflict-marker-size", "--", path])?
         .split('\0')
         .nth(2)
         .and_then(|size| size.parse().ok())
         .filter(|&size| size > 0)
-        .unwrap_or(7);
+        .unwrap_or(7))
+}
+
+// The lines in the path's blobs at these index stages that could be conflict markers.
+fn marker_lines(
+    git: &Git,
+    path: &str,
+    size: usize,
+    stages: &[u8],
+) -> Result<HashSet<String>, ProcessError> {
     let separator = "=".repeat(size);
     let markers = ['<', '|', '>'].map(|marker| marker.to_string().repeat(size));
     let mut lines = HashSet::new();

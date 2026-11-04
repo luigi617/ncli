@@ -43,6 +43,12 @@ case "$1 $2" in
 esac
 "#;
 
+    const FAKE_SSH: &str = r#"#!/bin/sh
+[ "$1" = -G ] && { echo "hostname github.com"; exit; }
+for last; do :; done
+cd "$FAKE_SSH_ROOT" && exec sh -c "$last"
+"#;
+
     struct Env {
         bin: TempDir,
         log: TempDir,
@@ -417,6 +423,30 @@ esac
             let stdout = env.succeed(&["code", "ship"], &[("FAKE_GH_OPEN", open)]);
             assert_eq!(stdout, "https://example.com/owner/repo/pull/7\n");
             assert_eq!(env.agent_calls(), 1);
+        }
+
+        #[test]
+        fn an_ssh_host_alias_is_resolved_for_gh() {
+            let env = Env::new();
+            let root = TempDir::new().unwrap();
+            fs::create_dir(root.path().join("owner")).unwrap();
+            std::os::unix::fs::symlink(env.origin.path(), root.path().join("owner/repo.git"))
+                .unwrap();
+            script(env.bin.path(), "ssh", FAKE_SSH);
+            env.git(&["remote", "set-url", "origin", "git@work:owner/repo.git"]);
+            env.write("feature.rs", "\n");
+            env.succeed(
+                &["code", "ship"],
+                &[("FAKE_SSH_ROOT", root.path().to_str().unwrap())],
+            );
+            let calls = env.logged("gh.log");
+            assert!(
+                calls
+                    .lines()
+                    .all(|call| call.contains("github.com/owner/repo ")
+                        || call.ends_with("github.com/owner/repo")),
+                "{calls}"
+            );
         }
 
         #[test]
@@ -875,6 +905,25 @@ esac
                 "git add README.md",
                 "the agent left conflict markers in README.md",
             );
+        }
+
+        #[test]
+        fn markers_are_checked_at_the_size_git_wrote_them() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feature"]);
+            env.write(".gitattributes", "README.md text\n");
+            env.write("README.md", "feature\n");
+            let tip = env.commit("Feature.");
+            env.push_upstream("main", ".gitattributes", "README.md -text\n");
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "printf 'README.md conflict-marker-size=10\\n' > .gitattributes && \
+                 git add .gitattributes README.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(
+                stderr.contains("the agent left conflict markers in README.md"),
+                "{stderr}"
+            );
+            env.assert_put_back(&tip);
         }
 
         #[test]
