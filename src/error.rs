@@ -59,19 +59,19 @@ pub enum Error {
     )]
     NoCommonHistory { repo: PathBuf, base: RemoteBranch },
     #[error(
-        "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
+        "the uncommitted changes inside submodules of {} cannot be included ({submodules}); commit them in the submodules first", .repo.display()
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
+        "files marked assume-unchanged or skip-worktree have edits that would be missed ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
     )]
     HiddenEdits(String),
     #[error(
-        "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
+        "untracked git repositories cannot be included ({0}); ignore them or add them as submodules"
     )]
     NestedRepositories(String),
     #[error(
-        "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
+        "the working tree undoes staged changes that would be missed ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
     )]
     UndoneStagedChanges(String),
     #[error("{agent} reported {url}, but it is not shipped: {problem}\n{}", .report.trim())]

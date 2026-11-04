@@ -3,7 +3,7 @@ use std::path::Path;
 use clap::Args;
 use clap::builder::NonEmptyStringValueParser;
 
-use super::review::Git;
+use super::review::{Git, Worktree};
 use crate::agent::AgentKind;
 use crate::commands::Context;
 use crate::error::Error;
@@ -31,6 +31,8 @@ pub enum Unsynced {
     NotOnto,
     #[error("the branch has merge commits")]
     Merges,
+    #[error("none of the branch's commits are left")]
+    Dropped,
     #[error("uncommitted changes are left")]
     Uncommitted,
     #[error("conflict markers are left in {0}")]
@@ -49,7 +51,9 @@ impl Sync {
         let (Some(branch), Some(tip)) = (head.branch.clone(), head.commit.clone()) else {
             return Err(Error::NotOnBranch(Box::new(head)));
         };
-        if git.uncommitted()? {
+        // The snapshot also sees work git status can hide, which putting the branch back would lose.
+        let snapshot = Worktree::snapshot(context.cancellation)?;
+        if snapshot.tree != git.run(&["rev-parse", "HEAD^{tree}"])? {
             return Err(Error::UncommittedChanges(repo));
         }
         let default = git.default_branch()?;
@@ -71,7 +75,7 @@ impl Sync {
                 }),
             });
         let Err(source) = result else {
-            return Ok(format!("Rebased onto {target}."));
+            return Ok(format!("Rebased onto {target}; the branch was at {tip}."));
         };
         let source = Box::new(source);
         // An interruption cancels the run's processes, and the branch must still be put back.
@@ -113,11 +117,15 @@ fn unsynced(git: &Git, branch: &str, onto: &str, tip: &str) -> Result<Option<Uns
         Err(ProcessError::Exit { code: 1, .. }) => return Ok(Some(Unsynced::NotOnto)),
         checked => checked?,
     };
-    if !git
-        .run(&["rev-list", "--merges", &format!("{onto}..HEAD")])?
-        .is_empty()
-    {
+    let range = format!("{onto}..HEAD");
+    if !git.run(&["rev-list", "--merges", &range])?.is_empty() {
         return Ok(Some(Unsynced::Merges));
+    }
+    let unmerged = git.run(&["cherry", onto, tip])?;
+    if unmerged.lines().any(|line| line.starts_with('+'))
+        && git.run(&["rev-list", &range])?.is_empty()
+    {
+        return Ok(Some(Unsynced::Dropped));
     }
     if git.uncommitted()? {
         return Ok(Some(Unsynced::Uncommitted));

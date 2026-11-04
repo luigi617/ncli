@@ -271,10 +271,13 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
             let env = Env::new();
             env.git(&["switch", "--quiet", "--create", "feature"]);
             env.write("feature.rs", "\n");
-            env.commit("Feature.");
+            let tip = env.commit("Feature.");
             env.push_upstream("main", "README.md", "upstream\n");
             let stdout = env.succeed(&["code", "sync"], &[]);
-            assert_eq!(stdout, "Rebased onto origin/main.\n");
+            assert_eq!(
+                stdout,
+                format!("Rebased onto origin/main; the branch was at {tip}.\n")
+            );
             assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
         }
 
@@ -293,9 +296,12 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
             let env = Env::new();
             env.git(&["push", "--quiet", "origin", "main:release"]);
             env.push_upstream("release", "release.md", "release\n");
-            env.feature(&["feature\n"]);
+            let tip = env.feature(&["feature\n"]);
             let stdout = env.succeed(&["code", "sync", "--from", "release"], &[]);
-            assert_eq!(stdout, "Rebased onto origin/release.\n");
+            assert_eq!(
+                stdout,
+                format!("Rebased onto origin/release; the branch was at {tip}.\n")
+            );
             assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("release"));
         }
 
@@ -373,10 +379,31 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
             env.write("notes.md", "License\n=======\n");
             env.commit("Feature.");
             env.push_upstream("main", "README.md", "upstream\n");
-            assert_eq!(
-                env.succeed(&["code", "sync"], &[]),
-                "Rebased onto origin/main.\n"
+            env.succeed(&["code", "sync"], &[]);
+            assert_eq!(env.read("notes.md"), "License\n=======\n");
+        }
+
+        #[test]
+        fn a_branch_whose_commits_the_agent_drops_is_put_back() {
+            put_back(
+                &[("FAKE_AFTER", "git reset --quiet --hard FETCH_HEAD")],
+                "none of the branch's commits are left",
             );
+        }
+
+        #[test]
+        fn hidden_edits_are_refused() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.git(&["update-index", "--assume-unchanged", "README.md"]);
+            env.write("README.md", "local\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("have edits that would be missed (README.md)"),
+                "{stderr}"
+            );
+            assert_eq!(env.agent_calls(), 0);
+            assert_eq!(env.read("README.md"), "local\n");
         }
 
         #[test]
@@ -403,6 +430,18 @@ echo "{\"state\": \"${FAKE_PR_STATE:-OPEN}\", \"baseRefName\": \"${FAKE_PR_BASE:
             let stderr = env.fail(&["code", "sync"], &[]);
             assert!(stderr.contains("has uncommitted changes"), "{stderr}");
             assert_eq!(env.agent_calls(), 0);
+        }
+
+        #[test]
+        fn untracked_files_hidden_by_config_are_refused() {
+            let env = Env::new();
+            env.feature(&["feature\n"]);
+            env.git(&["config", "status.showUntrackedFiles", "no"]);
+            env.write("stray.md", "\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(stderr.contains("has uncommitted changes"), "{stderr}");
+            assert_eq!(env.agent_calls(), 0);
+            assert_eq!(env.read("stray.md"), "\n");
         }
 
         #[test]

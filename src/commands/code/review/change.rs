@@ -144,7 +144,10 @@ impl<'a> Git<'a> {
     }
 
     pub(in crate::commands::code) fn uncommitted(&self) -> Result<bool, ProcessError> {
-        Ok(!self.run(&["status", "--porcelain"])?.is_empty())
+        // Explicit, since config can hide untracked files that a failed sync's clean would delete.
+        Ok(!self
+            .run(&["status", "--porcelain", "--untracked-files=normal"])?
+            .is_empty())
     }
 
     fn empty_tree(&self) -> Result<String, ProcessError> {
