@@ -180,35 +180,26 @@ esac
             tip
         }
 
-        // Adds an initialized submodule `sub`, checked out at the first of its two commits.
-        fn submodule(&self) -> (TempDir, String, String) {
+        // Adds an initialized submodule `sub`.
+        fn submodule(&self) -> TempDir {
             let sub = TempDir::new().unwrap();
             git(sub.path(), &["init", "--quiet", "--initial-branch", "main"]);
-            let mut commits = Vec::new();
-            for name in ["one", "two"] {
-                fs::write(sub.path().join(name), "\n").unwrap();
-                git(sub.path(), &["add", "--all"]);
-                git(sub.path(), &["commit", "--quiet", "--message", name]);
-                commits.push(git(sub.path(), &["rev-parse", "HEAD"]));
-            }
-            let url = sub.path().to_str().unwrap();
+            git(
+                sub.path(),
+                &["commit", "--quiet", "--allow-empty", "--message", "One."],
+            );
             self.git(&[
                 "-c",
                 "protocol.file.allow=always",
                 "submodule",
                 "add",
                 "--quiet",
-                url,
+                sub.path().to_str().unwrap(),
                 "sub",
             ]);
-            git(
-                &self.work.path().join("sub"),
-                &["checkout", "--quiet", &commits[0]],
-            );
             self.commit("Submodule.");
             self.git(&["push", "--quiet", "origin", "main"]);
-            let two = commits.pop().unwrap();
-            (sub, commits.pop().unwrap(), two)
+            sub
         }
 
         fn assert_put_back(&self, tip: &str) {
@@ -246,11 +237,16 @@ esac
                 env.git(&["rev-parse", "--abbrev-ref", "@{upstream}"]),
                 "origin/add-feature"
             );
+            let origin = env.origin.path().display();
             assert_eq!(
                 env.logged("gh.log"),
-                "repo view --json url\n\
-                 pr list --head add-feature --base main --state open --json url,isCrossRepository\n\
-                 pr create --base main --head add-feature --title Add a feature --body-file -\n"
+                format!(
+                    "repo view {origin} --json url\n\
+                     pr list --head add-feature --base main --state open --json \
+                     url,isCrossRepository --repo {origin}\n\
+                     pr create --base main --head add-feature --title Add a feature --body-file - \
+                     --repo {origin}\n"
+                )
             );
             assert_eq!(env.logged("gh.body"), "Adds it.\n\nIn full.");
             let prompt = env.logged("agent.1");
@@ -391,10 +387,13 @@ esac
         #[test]
         fn a_branch_that_tracks_its_base_ships_from_that_branch() {
             let env = Env::new();
+            let start = env.origin("main");
             let tip = env.feature(&["feature\n"]);
             env.git(&["branch", "--quiet", "--set-upstream-to", "origin/main"]);
+            env.git(&["config", "push.default", "upstream"]);
             env.succeed(&["code", "ship"], &[]);
             assert_eq!(env.origin("feature"), tip);
+            assert_eq!(env.origin("main"), start);
             assert_eq!(
                 env.git(&["rev-parse", "--abbrev-ref", "@{upstream}"]),
                 "origin/feature"
@@ -439,6 +438,25 @@ esac
         }
 
         #[test]
+        fn without_a_default_branch_the_current_branch_is_not_shipped_from() {
+            let env = Env::new();
+            env.git(&["push", "--quiet", "origin", "main:release"]);
+            env.git(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+            let start = env.git(&["rev-parse", "HEAD"]);
+            env.write("feature.rs", "\n");
+            env.succeed(&["code", "ship", "--into", "release"], &[]);
+            assert_eq!(env.git(&["branch", "--show-current"]), "add-feature");
+            assert_eq!(env.git(&["rev-parse", "main"]), start);
+            assert_eq!(env.origin("main"), start);
+            assert_eq!(env.origin("add-feature"), env.git(&["rev-parse", "HEAD"]));
+            assert!(
+                env.logged("gh.log")
+                    .contains("pr create --base release --head add-feature")
+            );
+            assert!(env.logged("agent.1").contains("so give its name"));
+        }
+
+        #[test]
         fn into_opens_the_pull_request_against_another_branch() {
             let env = Env::new();
             env.git(&["push", "--quiet", "origin", "main:release"]);
@@ -449,6 +467,20 @@ esac
                 env.logged("gh.log")
                     .contains("pr create --base release --head add-feature")
             );
+        }
+
+        #[test]
+        fn gh_works_on_the_remote_the_branch_is_pushed_to() {
+            let env = Env::new();
+            let other = TempDir::new().unwrap();
+            git(other.path(), &["init", "--quiet", "--bare"]);
+            env.git(&["remote", "add", "upstream", other.path().to_str().unwrap()]);
+            env.write("feature.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            let origin = env.origin.path().to_str().unwrap();
+            let calls = env.logged("gh.log");
+            assert_eq!(calls.lines().count(), 3, "{calls}");
+            assert!(calls.lines().all(|call| call.contains(origin)), "{calls}");
         }
     }
 
@@ -590,7 +622,7 @@ esac
 
         const HIJACK: &str = "printf 'HIJACKED\\n' > other.md";
 
-        fn edit_to_hidden_file_is_undone(flag: &str, listed: &str, edit: &str) {
+        fn hidden_edit_is_undone(flag: &str, listed: &str, edit: &str) {
             let env = Env::new();
             env.write("other.md", "other\n");
             env.commit("Other.");
@@ -598,9 +630,8 @@ esac
             let tip = env.feature(&["feature\n"]);
             env.push_upstream("main", "README.md", "upstream\n");
             env.git(&["update-index", flag, "other.md"]);
-            let resolve = format!("printf 'x\\n' > README.md && git add README.md && {edit}");
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
-            assert!(stderr.contains("conflicted files (other.md)"), "{stderr}");
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", edit)]);
+            assert!(stderr.contains("unmerged paths (README.md)"), "{stderr}");
             env.assert_put_back(&tip);
             assert_eq!(env.read("other.md"), "other\n");
             assert_eq!(env.git(&["ls-files", "-v", "other.md"]), listed);
@@ -608,17 +639,38 @@ esac
 
         #[test]
         fn an_agent_that_edits_an_assume_unchanged_file_is_undone() {
-            edit_to_hidden_file_is_undone("--assume-unchanged", "h other.md", HIJACK);
+            hidden_edit_is_undone("--assume-unchanged", "h other.md", HIJACK);
         }
 
         #[test]
         fn an_agent_that_edits_a_skip_worktree_file_is_undone() {
-            edit_to_hidden_file_is_undone("--skip-worktree", "S other.md", HIJACK);
+            hidden_edit_is_undone("--skip-worktree", "S other.md", HIJACK);
         }
 
         #[test]
         fn an_agent_that_deletes_a_skip_worktree_file_is_undone() {
-            edit_to_hidden_file_is_undone("--skip-worktree", "S other.md", "rm other.md");
+            hidden_edit_is_undone("--skip-worktree", "S other.md", "rm other.md");
+        }
+
+        #[test]
+        fn hidden_bits_the_rebase_or_the_agent_clears_are_put_back() {
+            let env = Env::new();
+            env.write("other.md", "other\n");
+            env.write("cfg.md", "cfg\n");
+            env.commit("Other.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "other.md", "upstream\n");
+            env.push_upstream("main", "README.md", "upstream\n");
+            env.git(&["update-index", "--assume-unchanged", "other.md"]);
+            env.git(&["update-index", "--skip-worktree", "cfg.md"]);
+            let resolve = "git update-index --no-skip-worktree cfg.md";
+            env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            env.assert_put_back(&tip);
+            assert_eq!(
+                env.git(&["ls-files", "-v", "other.md", "cfg.md"]),
+                "S cfg.md\nh other.md"
+            );
         }
 
         fn left_out_by_sparse_checkout() -> (Env, String) {
@@ -642,11 +694,9 @@ esac
         }
 
         #[test]
-        fn an_agent_that_creates_a_skip_worktree_file_left_out_is_undone() {
+        fn a_file_left_out_of_the_checkout_that_the_agent_creates_is_removed() {
             let (env, tip) = left_out_by_sparse_checkout();
-            let resolve = format!("printf 'x\\n' > README.md && git add README.md && {HIJACK}");
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
-            assert!(stderr.contains("conflicted files (other.md)"), "{stderr}");
+            env.fail(&["code", "sync"], &[("FAKE_RESOLVE", HIJACK)]);
             env.assert_put_back(&tip);
             assert!(!env.work.path().join("other.md").exists());
             assert_eq!(env.git(&["ls-files", "-v", "other.md"]), "S other.md");
@@ -758,6 +808,41 @@ esac
         }
 
         #[test]
+        fn markers_on_a_side_of_a_renamed_file_are_kept() {
+            let env = Env::new();
+            let text = "Text.\n".repeat(10);
+            env.write("docs.rst", &format!("Title\n\n{text}"));
+            env.commit("Docs.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            env.feature(&[]);
+            env.write(
+                "docs.rst",
+                &format!("Feature\n\n{text}\nInstall\n=======\n"),
+            );
+            env.commit("Feature.");
+            let clone = TempDir::new().unwrap();
+            git(
+                clone.path(),
+                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
+            );
+            git(clone.path(), &["mv", "docs.rst", "guide.rst"]);
+            fs::write(
+                clone.path().join("guide.rst"),
+                format!("Upstream\n\n{text}"),
+            )
+            .unwrap();
+            git(
+                clone.path(),
+                &["commit", "--quiet", "--all", "--message", "Rename."],
+            );
+            git(clone.path(), &["push", "--quiet", "origin", "main"]);
+            let merged = "printf 'Both\\n\\n%s\\nInstall\\n=======\\n' \"$(git show HEAD:guide.rst | tail -n +3)\" > guide.rst && git add guide.rst";
+            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", merged)]);
+            assert!(env.read("guide.rst").ends_with("\nInstall\n=======\n"));
+            assert_eq!(env.agent_calls(), 1);
+        }
+
+        #[test]
         fn a_dirty_working_tree_is_refused_before_fetching() {
             let env = Env::new();
             let tip = env.feature(&["feature\n"]);
@@ -769,22 +854,6 @@ esac
             );
             assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
             assert_eq!(env.agent_calls(), 0);
-        }
-
-        #[test]
-        fn a_submodule_edit_hidden_by_config_is_refused() {
-            let env = Env::new();
-            env.submodule();
-            let tip = env.feature(&["feature\n"]);
-            env.git(&["config", "submodule.sub.ignore", "all"]);
-            env.write("sub/one", "mine\n");
-            let stderr = env.fail(&["code", "sync"], &[]);
-            assert!(
-                stderr.contains("has uncommitted changes or untracked files (sub)"),
-                "{stderr}"
-            );
-            assert_eq!(env.git(&["rev-parse", "HEAD"]), tip);
-            assert_eq!(env.read("sub/one"), "mine\n");
         }
 
         #[test]
@@ -825,35 +894,6 @@ esac
         }
 
         #[test]
-        fn a_submodule_conflict_is_resolved_by_the_agent() {
-            let gitlink = |dir: &std::path::Path, id: char| {
-                let info = format!("160000,{},module", id.to_string().repeat(40));
-                git(dir, &["update-index", "--add", "--cacheinfo", &info]);
-                git(dir, &["commit", "--quiet", "--message", "Module."]);
-            };
-            let env = Env::new();
-            gitlink(env.work.path(), '1');
-            fs::create_dir(env.work.path().join("module")).unwrap();
-            env.git(&["push", "--quiet", "origin", "main"]);
-            env.git(&["switch", "--quiet", "--create", "feature"]);
-            gitlink(env.work.path(), '2');
-            let clone = TempDir::new().unwrap();
-            git(
-                clone.path(),
-                &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
-            );
-            gitlink(clone.path(), '3');
-            git(clone.path(), &["push", "--quiet", "origin", "main"]);
-            let resolve = format!(
-                "git update-index --cacheinfo 160000,{},module",
-                "4".repeat(40)
-            );
-            env.succeed(&["code", "sync"], &[("FAKE_RESOLVE", &resolve)]);
-            assert_eq!(env.git(&["rev-parse", "HEAD:module"]), "4".repeat(40));
-            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
-        }
-
-        #[test]
         fn a_rebase_in_progress_is_refused() {
             let env = Env::new();
             env.feature(&["feature\n"]);
@@ -880,44 +920,59 @@ esac
         }
 
         #[test]
-        fn a_submodule_the_rebase_leaves_behind_does_not_count_against_the_agent() {
+        fn files_and_repositories_the_agent_creates_are_removed() {
             let env = Env::new();
-            let (_sub, _, two) = env.submodule();
-            env.feature(&["feature\n"]);
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let resolve = "printf 'x\\n' > new.md && \
+                 git init --quiet ref && printf 'x\\n' > ref/new.md && \
+                 printf 'x\\n' > README.md && git add README.md";
+            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
+            assert!(
+                stderr.contains("conflicted files (new.md, ref/)"),
+                "{stderr}"
+            );
+            env.assert_put_back(&tip);
+            assert_eq!(
+                env.git(&["status", "--porcelain", "--untracked-files=all"]),
+                ""
+            );
+            assert!(!env.work.path().join("ref").exists());
+        }
+
+        #[test]
+        fn a_branch_with_a_submodule_is_refused() {
+            let env = Env::new();
+            let _sub = env.submodule();
+            let tip = env.feature(&["feature\n"]);
+            env.push_upstream("main", "README.md", "upstream\n");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(
+                stderr.contains("does not support submodules, and feature has one at sub"),
+                "{stderr}"
+            );
+            env.assert_put_back(&tip);
+        }
+
+        #[test]
+        fn a_target_that_adds_a_submodule_is_refused() {
+            let env = Env::new();
+            let tip = env.feature(&["feature\n"]);
             let clone = TempDir::new().unwrap();
             git(
                 clone.path(),
                 &["clone", "--quiet", env.origin.path().to_str().unwrap(), "."],
             );
-            fs::write(clone.path().join("README.md"), "upstream\n").unwrap();
-            git(clone.path(), &["add", "README.md"]);
-            let info = format!("160000,{two},sub");
-            git(clone.path(), &["update-index", "--cacheinfo", &info]);
+            let info = format!("160000,{},module", "1".repeat(40));
             git(
                 clone.path(),
-                &["commit", "--quiet", "--message", "Upstream."],
+                &["update-index", "--add", "--cacheinfo", &info],
             );
+            git(clone.path(), &["commit", "--quiet", "--message", "Module."]);
             git(clone.path(), &["push", "--quiet", "origin", "main"]);
-            env.succeed(&["code", "sync"], &[]);
-            assert_eq!(env.git(&["rev-parse", "HEAD~1"]), env.origin("main"));
-            assert_eq!(env.git(&["rev-parse", "HEAD:sub"]), two);
-        }
-
-        #[test]
-        fn a_submodule_the_agent_moves_is_put_back() {
-            let env = Env::new();
-            let (_sub, one, _) = env.submodule();
-            let tip = env.feature(&["feature\n"]);
-            env.push_upstream("main", "README.md", "upstream\n");
-            let resolve = "(cd sub && git checkout --quiet main) && \
-                 printf 'x\\n' > README.md && git add README.md";
-            let stderr = env.fail(&["code", "sync"], &[("FAKE_RESOLVE", resolve)]);
-            assert!(stderr.contains("conflicted files (sub)"), "{stderr}");
+            let stderr = env.fail(&["code", "sync"], &[]);
+            assert!(stderr.contains("has one at module"), "{stderr}");
             env.assert_put_back(&tip);
-            assert_eq!(
-                git(&env.work.path().join("sub"), &["rev-parse", "HEAD"]),
-                one
-            );
         }
 
         #[test]

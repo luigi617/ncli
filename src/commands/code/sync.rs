@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::path::Path;
 
 use clap::Args;
 use clap::builder::NonEmptyStringValueParser;
 
-use super::git::{Git, Head, Operation, Upstream};
+use super::git::{Git, Head, Hidden, Operation, Upstream};
 use crate::agent::{Agent, AgentKind};
 use crate::commands::{Context, count};
 use crate::error::Error;
@@ -14,8 +15,13 @@ use crate::process::{Cancellation, Cli, ProcessError};
 
 const MARKERS: [&str; 3] = ["<<<<<<<", "|||||||", ">>>>>>>"];
 
-/// Rebase the current branch onto another branch, resolving conflicts with an agent. If the
-/// rebase cannot be finished, the branch is put back where it was.
+/// Rebase the current branch onto another branch, resolving conflicts with an agent.
+///
+/// The working tree must be clean, including files marked assume-unchanged or skip-worktree. The
+/// agent may change only the conflicted files: any change git sees to another tracked path,
+/// anything else staged, or a new untracked file fails the sync, while ignored files it creates
+/// are left alone. If the rebase cannot be finished, the branch, index, and working tree are put
+/// back as they were. Repositories with submodules are not supported.
 #[derive(Debug, Args)]
 pub struct Sync {
     /// Branch to rebase onto [default: the remote's default branch]
@@ -63,22 +69,22 @@ impl Sync {
         let (Some(branch), Some(tip)) = (head.branch_name(), head.commit.as_deref()) else {
             return Err(Error::NotOnBranch(Box::new(head)));
         };
-        let dirty = git.status()?;
+        let dirty: Vec<_> = git.status()?.into_iter().map(|(_, path)| path).collect();
         if !dirty.is_empty() {
             return Err(Error::UncommittedChanges {
                 repo,
-                paths: dirty
-                    .into_iter()
-                    .map(|(_, path)| path)
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                paths: dirty.join(", "),
             });
         }
-        git.index_copy()?.1.refuse_hidden_edits()?;
-        let watched = git.watched()?;
+        let hidden = git.index_copy()?.1.refuse_hidden_edits()?;
         let from = git.upstream(self.from.as_deref())?;
         context.progress(&format!("fetching {from}"));
         let onto = git.fetch(&from)?;
+        for (name, rev) in [(branch.to_owned(), tip), (from.to_string(), onto.as_str())] {
+            if let Some(path) = submodule(&git, rev)? {
+                return Err(Error::Submodule { branch: name, path });
+            }
+        }
         context.progress(&format!("rebasing {branch} onto {from}"));
         let source = match rebase(&git, &agent, &onto, branch, &from, context) {
             Ok(0) => return Ok(format!("Rebased {branch} onto {from}.")),
@@ -96,7 +102,7 @@ impl Sync {
             ..git
         };
         let (branch, from, tip) = (branch.to_owned(), from.to_string(), tip.to_owned());
-        Err(match restore(&git, &branch, &tip, &watched) {
+        Err(match restore(&git, &branch, &tip, &hidden) {
             Ok(()) => Error::NotSynced {
                 branch,
                 from,
@@ -165,8 +171,11 @@ fn resolve(
     conflicted: &[String],
 ) -> Result<(), Error> {
     let before = git.index()?;
-    let worktree = git.status()?;
-    let watched = git.watched()?;
+    let before_worktree = worktree(git)?;
+    let sides = conflicted
+        .iter()
+        .map(|path| marker_lines(git, [2, 3].map(|stage| format!(":{stage}:{path}"))))
+        .collect::<Result<Vec<_>, _>>()?;
     context.progress(&format!(
         "resolving {}",
         count(conflicted.len(), "conflict")
@@ -182,11 +191,10 @@ fn resolve(
     if !unmerged.is_empty() {
         return Err(Unresolved::Unmerged(unmerged.join(", ")).into());
     }
-    let mut outside: Vec<String> = git
-        .status()?
-        .into_iter()
-        .filter(|entry| !entry.0.ends_with(' ') && !worktree.contains(entry))
-        .map(|(_, path)| path)
+    // Edits git does not see, behind assume-unchanged or skip-worktree, cannot reach the commits.
+    let mut outside: Vec<String> = worktree(git)?
+        .difference(&before_worktree)
+        .map(|(_, path)| path.clone())
         .collect();
     let after = git.index()?;
     outside.extend(
@@ -203,23 +211,14 @@ fn resolve(
             )
             .map(str::to_owned),
     );
-    outside.extend(git.index_copy()?.1.hidden_edits(&watched)?);
     outside.sort();
     outside.dedup();
     if !outside.is_empty() {
         return Err(Unresolved::Outside(outside.join(", ")).into());
     }
     let mut marked = Vec::new();
-    for path in conflicted {
-        let sides: HashSet<String> = [format!("HEAD:{path}"), format!("REBASE_HEAD:{path}")]
-            .iter()
-            .map(|rev| blob(git, rev))
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .flat_map(|side| markers(side))
-            .collect();
-        let resolved = blob(git, &format!(":0:{path}"))?;
-        if markers(&resolved).any(|line| !sides.contains(&line)) {
+    for (path, sides) in conflicted.iter().zip(&sides) {
+        if !marker_lines(git, [format!(":0:{path}")])?.is_subset(sides) {
             marked.push(path.as_str());
         }
     }
@@ -272,25 +271,33 @@ fn blob(git: &Git, rev: &str) -> Result<String, ProcessError> {
     })
 }
 
-fn markers(text: &str) -> impl Iterator<Item = String> {
-    text.lines()
-        .filter(|line| *line == "=======" || MARKERS.iter().any(|marker| line.starts_with(marker)))
-        .map(str::to_owned)
+fn marker_lines(
+    git: &Git,
+    revs: impl IntoIterator<Item = String>,
+) -> Result<HashSet<String>, ProcessError> {
+    let mut lines = HashSet::new();
+    for rev in revs {
+        lines.extend(
+            blob(git, &rev)?
+                .lines()
+                .filter(|line| {
+                    *line == "=======" || MARKERS.iter().any(|marker| line.starts_with(marker))
+                })
+                .map(str::to_owned),
+        );
+    }
+    Ok(lines)
 }
 
-fn restore(
-    git: &Git,
-    branch: &str,
-    tip: &str,
-    watched: &HashMap<String, bool>,
-) -> Result<(), Error> {
+fn restore(git: &Git, branch: &str, tip: &str, hidden: &Hidden) -> Result<(), Error> {
     let index = git.index()?;
+    // With the bits cleared, the resets write every file the user did not leave out.
     git.unhide(
         index
             .hidden()
             .into_iter()
             .map(|(path, _)| path)
-            .filter(|path| !watched.contains_key(*path)),
+            .filter(|path| !hidden.left_out.contains(*path)),
     )?;
     // Aborting checks out the old tip, which files the agent left in its way would block.
     git.run(&["reset", "--quiet", "--hard"])?;
@@ -299,36 +306,47 @@ fn restore(
         git.run(&["rebase", "--abort"])?;
     }
     git.run(&["switch", "--quiet", "--discard-changes", branch])?;
-    git.run(&["reset", "--quiet", "--hard", "--recurse-submodules", tip])?;
-    git.run(&["clean", "--quiet", "--force", "-d"])?;
-    let (left_out, edited): (Vec<String>, Vec<String>) = git
-        .index_copy()?
-        .1
-        .hidden_edits(watched)?
-        .into_iter()
-        .partition(|path| watched[path]);
-    for path in left_out {
+    git.run(&["reset", "--quiet", "--hard", tip])?;
+    // Forcing twice also removes repositories the agent created.
+    git.run(&["clean", "--quiet", "--force", "--force", "-d"])?;
+    for path in &hidden.left_out {
         let path = git.cwd.join(path);
-        match path.symlink_metadata() {
-            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
-            _ => fs::remove_file(&path),
-        }
-        .map_err(|source| Error::RemoveCreated { path, source })?;
+        remove(&path).map_err(|source| Error::RemoveCreated { path, source })?;
     }
-    let edited: String = edited.into_iter().map(|path| format!("{path}\0")).collect();
-    if !edited.is_empty() {
-        git.run_with_input(
-            &[
-                "checkout-index",
-                "--force",
-                "--ignore-skip-worktree-bits",
-                "-z",
-                "--stdin",
-            ],
-            Some(edited.as_bytes()),
-        )?;
-    }
+    git.set_hidden(
+        hidden
+            .paths
+            .iter()
+            .map(|(path, hiding)| (path.as_str(), *hiding)),
+    )?;
     Ok(())
+}
+
+fn remove(path: &Path) -> io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+// Each change git sees in the working tree that the index does not hold.
+fn worktree(git: &Git) -> Result<HashSet<(String, String)>, ProcessError> {
+    Ok(git
+        .status()?
+        .into_iter()
+        .filter(|(code, _)| !code.ends_with(' '))
+        .collect())
+}
+
+fn submodule(git: &Git, rev: &str) -> Result<Option<String>, ProcessError> {
+    let tree = git.run(&["ls-tree", "-r", "-z", rev])?;
+    Ok(tree
+        .split_terminator('\0')
+        .filter(|entry| entry.starts_with("160000 "))
+        .find_map(|entry| entry.split_once('\t'))
+        .map(|(_, path)| path.to_owned()))
 }
 
 fn prompt(git: &Git, branch: &str, from: &Upstream, stop: &Stop, conflicted: &[String]) -> String {

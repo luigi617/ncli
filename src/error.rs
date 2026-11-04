@@ -62,9 +62,9 @@ pub enum Error {
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files marked assume-unchanged or skip-worktree have edits that would be missed ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
+        "files in {} marked assume-unchanged or skip-worktree have edits that would be missed ({paths}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`", .repo.display()
     )]
-    HiddenEdits(String),
+    HiddenEdits { repo: PathBuf, paths: String },
     #[error(
         "untracked git repositories cannot be included ({0}); ignore them or add them as submodules"
     )]
@@ -106,6 +106,8 @@ pub enum Error {
     RebaseState(#[source] io::Error),
     #[error("could not remove {}, which the agent created: {source}", .path.display())]
     RemoveCreated { path: PathBuf, source: io::Error },
+    #[error("code sync does not support submodules, and {branch} has one at {path}")]
+    Submodule { branch: String, path: String },
     #[error(transparent)]
     Unresolved(#[from] Unresolved),
     #[error("{agent} changed the work in {} while describing it, so it was not shipped", .repo.display())]
@@ -248,7 +250,7 @@ impl Error {
             | Self::NoChanges { .. }
             | Self::NoCommonHistory { .. }
             | Self::DirtySubmodules { .. }
-            | Self::HiddenEdits(_)
+            | Self::HiddenEdits { .. }
             | Self::NestedRepositories(_)
             | Self::UndoneStagedChanges(_)
             | Self::NothingImplemented { .. }
@@ -259,6 +261,7 @@ impl Error {
             | Self::Unresolved(_)
             | Self::RebaseState(_)
             | Self::RemoveCreated { .. }
+            | Self::Submodule { .. }
             | Self::ChangedWhileDescribing { .. }
             | Self::UnusableAnswer { .. }
             | Self::OtherUpstream { .. }

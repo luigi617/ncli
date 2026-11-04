@@ -714,10 +714,10 @@ esac
         let error = local_review_error(repo.path());
         assert!(
             error.contains(
-                "ncli code review: error: files marked assume-unchanged or skip-worktree have edits \
-                 that would be missed (README.md); commit or revert them, or clear the marks with \
-                 `git update-index --no-assume-unchanged <paths>` and then `git update-index \
-                 --no-skip-worktree <paths>`"
+                "marked assume-unchanged or skip-worktree have edits that would be missed \
+                 (README.md); commit or revert them, or clear the marks with `git update-index \
+                 --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree \
+                 <paths>`"
             ),
             "{error}"
         );

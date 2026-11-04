@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -111,6 +111,36 @@ impl fmt::Display for Head {
     }
 }
 
+// The index bits that keep git from comparing a path with the working tree.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Hiding {
+    assume_unchanged: bool,
+    skip_worktree: bool,
+}
+
+impl Hiding {
+    fn flags(self) -> [&'static str; 2] {
+        [
+            if self.assume_unchanged {
+                "--assume-unchanged"
+            } else {
+                "--no-assume-unchanged"
+            },
+            if self.skip_worktree {
+                "--skip-worktree"
+            } else {
+                "--no-skip-worktree"
+            },
+        ]
+    }
+}
+
+// The paths marked assume-unchanged or skip-worktree, and those a sparse checkout left out.
+pub(super) struct Hidden {
+    pub(super) paths: Vec<(String, Hiding)>,
+    pub(super) left_out: HashSet<String>,
+}
+
 // Each path with its index entry, tagged to show the skip-worktree and assume-unchanged flags.
 pub(super) struct Index(pub(super) HashSet<(String, String)>);
 
@@ -122,14 +152,16 @@ impl Index {
             .collect()
     }
 
-    // Each path git does not compare with the working tree, and whether it is skip-worktree.
-    pub(super) fn hidden(&self) -> HashSet<(&str, bool)> {
+    pub(super) fn hidden(&self) -> Vec<(&str, Hiding)> {
         self.0
             .iter()
             .filter_map(|(path, entry)| {
                 let tag = entry.chars().next()?;
-                (tag == 'S' || tag.is_ascii_lowercase())
-                    .then_some((path.as_str(), tag.eq_ignore_ascii_case(&'s')))
+                let hiding = Hiding {
+                    assume_unchanged: tag.is_ascii_lowercase(),
+                    skip_worktree: tag.eq_ignore_ascii_case(&'s'),
+                };
+                (hiding != Hiding::default()).then_some((path.as_str(), hiding))
             })
             .collect()
     }
@@ -204,15 +236,27 @@ impl<'a> Git<'a> {
         &self,
         paths: impl IntoIterator<Item = &'p str>,
     ) -> Result<(), ProcessError> {
-        let paths: String = paths.into_iter().map(|path| format!("{path}\0")).collect();
-        if paths.is_empty() {
-            return Ok(());
+        self.set_hidden(paths.into_iter().map(|path| (path, Hiding::default())))
+    }
+
+    pub(super) fn set_hidden<'p>(
+        &self,
+        paths: impl IntoIterator<Item = (&'p str, Hiding)>,
+    ) -> Result<(), ProcessError> {
+        let mut inputs: BTreeMap<&str, String> = BTreeMap::new();
+        for (path, hiding) in paths {
+            for flag in hiding.flags() {
+                inputs
+                    .entry(flag)
+                    .or_default()
+                    .push_str(&format!("{path}\0"));
+            }
         }
-        // With --stdin, update-index applies only one of several flags, so each has its own call.
-        for flag in ["--no-assume-unchanged", "--no-skip-worktree"] {
+        // With --stdin, update-index applies only one of several flags.
+        for (flag, input) in inputs {
             self.run_with_input(
                 &["update-index", flag, "-z", "--stdin"],
-                Some(paths.as_bytes()),
+                Some(input.as_bytes()),
             )?;
         }
         Ok(())
@@ -236,52 +280,43 @@ impl<'a> Git<'a> {
         Ok((dir, git))
     }
 
-    // Each hidden path, and whether a sparse checkout leaves it out: a skip-worktree file missing
-    // from disk is not edited, and is edited once it appears.
-    pub(super) fn watched(&self) -> Result<HashMap<String, bool>, ProcessError> {
-        Ok(self
+    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
+    // index. A skip-worktree file missing from disk is left out by a sparse checkout, not edited.
+    pub(super) fn refuse_hidden_edits(&self) -> Result<Hidden, Error> {
+        let paths: Vec<(String, Hiding)> = self
             .index()?
             .hidden()
             .into_iter()
-            .map(|(path, skip)| (path.to_owned(), skip && !self.on_disk(path)))
-            .collect())
-    }
-
-    fn on_disk(&self, path: &str) -> bool {
-        self.cwd.join(path).symlink_metadata().is_ok()
-    }
-
-    // Clears the assume-unchanged and skip-worktree bits, so it must only run on a copy of the
-    // index.
-    pub(super) fn hidden_edits(
-        &self,
-        watched: &HashMap<String, bool>,
-    ) -> Result<Vec<String>, ProcessError> {
-        let (left_out, kept): (Vec<_>, Vec<_>) = watched.iter().partition(|(_, out)| **out);
-        let mut edits: Vec<String> = left_out
-            .into_iter()
-            .map(|(path, _)| path)
-            .filter(|path| self.on_disk(path))
-            .cloned()
+            .map(|(path, hiding)| (path.to_owned(), hiding))
             .collect();
-        if !kept.is_empty() {
-            self.unhide(kept.into_iter().map(|(path, _)| path.as_str()))?;
-            edits.extend(
-                self.changed_paths(&[])?
-                    .split_terminator('\0')
-                    .filter(|path| watched.get(*path) == Some(&false))
-                    .map(str::to_owned),
-            );
+        let left_out: HashSet<String> = paths
+            .iter()
+            .filter(|(path, hiding)| {
+                hiding.skip_worktree && self.cwd.join(path).symlink_metadata().is_err()
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        let marked: HashSet<&str> = paths
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .filter(|path| !left_out.contains(*path))
+            .collect();
+        if marked.is_empty() {
+            return Ok(Hidden { paths, left_out });
         }
-        Ok(edits)
-    }
-
-    pub(super) fn refuse_hidden_edits(&self) -> Result<(), Error> {
-        let hidden = self.hidden_edits(&self.watched()?)?;
-        if hidden.is_empty() {
-            return Ok(());
+        self.unhide(marked.iter().copied())?;
+        let modified = self.changed_paths(&[])?;
+        let edited: Vec<&str> = modified
+            .split('\0')
+            .filter(|path| marked.contains(path))
+            .collect();
+        if !edited.is_empty() {
+            return Err(Error::HiddenEdits {
+                repo: self.cwd.to_owned(),
+                paths: edited.join(", "),
+            });
         }
-        Err(Error::HiddenEdits(hidden.join(", ")))
+        Ok(Hidden { paths, left_out })
     }
 
     pub(super) fn changed_paths(&self, diff: &[&str]) -> Result<String, ProcessError> {

@@ -81,13 +81,19 @@ impl Ship {
                 base: into.tracking(),
             });
         }
-        let current = head
-            .branch_name()
-            .filter(|&branch| branch != into.branch && Some(branch) != default.as_deref());
-        if let Some(branch) = current {
-            check_upstream(&git, branch, &into, default.as_deref())?;
+        // Without a known default branch, the current branch could be the remote's primary one.
+        let current = default.as_deref().and_then(|default| {
+            head.branch_name()
+                .filter(|&branch| branch != into.branch && branch != default)
+                .map(|branch| (branch, default))
+        });
+        if let Some((branch, default)) = current {
+            check_upstream(&git, branch, &into, default)?;
         }
-        gh(&git, &["repo", "view", "--json", "url"], None)?;
+        let current = current.map(|(branch, _)| branch);
+        // gh would otherwise pick a repository itself, which need not be the one pushed to.
+        let remote_url = git.run(&["remote", "get-url", &into.remote])?;
+        gh(&git, &["repo", "view", &remote_url, "--json", "url"], None)?;
         context.progress("describing the change");
         let (_, shipment) = agent.perform_as::<Shipment>(
             &prompt(repo, &into, &merge_base, current, uncommitted),
@@ -123,6 +129,8 @@ impl Ship {
             )?;
         }
         context.progress(&format!("pushing {branch}"));
+        // A full refspec, so push config cannot send the branch to another remote branch.
+        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
         git.run(&[
             "push",
             "--quiet",
@@ -130,7 +138,7 @@ impl Ship {
             "--force-if-includes",
             "--set-upstream",
             &into.remote,
-            &branch,
+            &refspec,
         ])?;
         let listed = gh(
             &git,
@@ -145,6 +153,8 @@ impl Ship {
                 "open",
                 "--json",
                 "url,isCrossRepository",
+                "--repo",
+                &remote_url,
             ],
             None,
         )?;
@@ -166,6 +176,8 @@ impl Ship {
                 &one_line(&shipment.title),
                 "--body-file",
                 "-",
+                "--repo",
+                &remote_url,
             ],
             Some(shipment.body.as_bytes()),
         )?;
@@ -215,12 +227,7 @@ impl Shipment {
 }
 
 // Pushing a branch that tracks another branch would leave that branch, and its pull request, behind.
-fn check_upstream(
-    git: &Git,
-    branch: &str,
-    into: &Upstream,
-    default: Option<&str>,
-) -> Result<(), Error> {
+fn check_upstream(git: &Git, branch: &str, into: &Upstream, default: &str) -> Result<(), Error> {
     let Some(upstream) = git.optional(&[
         "rev-parse",
         "--verify",
@@ -231,10 +238,8 @@ fn check_upstream(
     else {
         return Ok(());
     };
-    let expected = [Some(branch), Some(into.branch.as_str()), default];
-    if expected
+    if [branch, into.branch.as_str(), default]
         .into_iter()
-        .flatten()
         .any(|name| upstream == into.named(Some(name)).tracking().0)
     {
         return Ok(());
