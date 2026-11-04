@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::commands::code::review::{Change, Head, RemoteBranch};
+use crate::commands::code::{Unshipped, Unsynced};
 use crate::commands::session::SessionName;
 use crate::process::{MissingExecutables, NoExecutable, ProcessError, last_lines};
 use crate::state::{DIR_VAR, Entry};
@@ -58,21 +59,57 @@ pub enum Error {
     )]
     NoCommonHistory { repo: PathBuf, base: RemoteBranch },
     #[error(
-        "the uncommitted changes inside submodules of {} cannot be reviewed ({submodules}); commit them in the submodules first", .repo.display()
+        "the uncommitted changes inside submodules of {} cannot be included ({submodules}); commit them in the submodules first", .repo.display()
     )]
     DirtySubmodules { repo: PathBuf, submodules: String },
     #[error(
-        "files marked assume-unchanged or skip-worktree have edits the review would miss ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
+        "files marked assume-unchanged or skip-worktree have edits that would be missed ({0}); commit or revert them, or clear the marks with `git update-index --no-assume-unchanged <paths>` and then `git update-index --no-skip-worktree <paths>`"
     )]
     HiddenEdits(String),
     #[error(
-        "untracked git repositories cannot be reviewed ({0}); ignore them or add them as submodules"
+        "untracked git repositories cannot be included ({0}); ignore them or add them as submodules"
     )]
     NestedRepositories(String),
     #[error(
-        "the working tree undoes staged changes the review would miss ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
+        "the working tree undoes staged changes that would be missed ({0}); commit them, or make the working tree match the index, for example by ignoring files removed with `git rm --cached`"
     )]
     UndoneStagedChanges(String),
+    #[error("{agent} reported {url}, but it is not shipped: {problem}\n{}", .report.trim())]
+    NotShipped {
+        agent: String,
+        url: String,
+        problem: Unshipped,
+        report: String,
+    },
+    #[error("gh returned unexpected output: {0}")]
+    GhOutput(#[source] serde_json::Error),
+    #[error("HEAD is {0}, not a branch to rebase")]
+    NotOnBranch(Box<Head>),
+    #[error("a rebase is in progress in {}; finish or abort it first", .0.display())]
+    Rebasing(PathBuf),
+    #[error("{} has uncommitted changes or untracked files; commit, stash, or remove them first", .0.display())]
+    UncommittedChanges(PathBuf),
+    #[error("{agent} did not finish the rebase: {problem}\n{}", .report.trim())]
+    RebaseUnfinished {
+        agent: String,
+        problem: Unsynced,
+        report: String,
+    },
+    #[error("could not rebase onto {target}, so the branch was put back at {tip}: {source}")]
+    NotSynced {
+        target: String,
+        tip: String,
+        source: Box<Error>,
+    },
+    #[error(
+        "could not rebase onto {target}: {source}\nputting the branch back at {tip} also failed: {restore}"
+    )]
+    NotRestored {
+        target: String,
+        tip: String,
+        source: Box<Error>,
+        restore: Box<ProcessError>,
+    },
     #[error("{agent} left no changes in {} to review: {}", .repo.display(), .report.trim())]
     NothingImplemented {
         agent: String,
@@ -183,7 +220,9 @@ impl Error {
         match self {
             Self::MissingExecutables(_) | Self::NoExecutable(_) => Self::MISSING_EXECUTABLE,
             Self::EmptyTask | Self::NotATask(_) => Self::USAGE,
-            Self::Resumable { source, .. } => source.exit_code(),
+            Self::Resumable { source, .. }
+            | Self::NotSynced { source, .. }
+            | Self::NotRestored { source, .. } => source.exit_code(),
             Self::WorkingDirectory(_)
             | Self::InvalidAnswer { .. }
             | Self::NoSession(_)
@@ -201,6 +240,12 @@ impl Error {
             | Self::NestedRepositories(_)
             | Self::UndoneStagedChanges(_)
             | Self::NothingImplemented { .. }
+            | Self::NotShipped { .. }
+            | Self::GhOutput(_)
+            | Self::NotOnBranch(_)
+            | Self::Rebasing(_)
+            | Self::UncommittedChanges(_)
+            | Self::RebaseUnfinished { .. }
             | Self::HeadMoved { .. }
             | Self::Unsettled { .. }
             | Self::NothingWritten(_)

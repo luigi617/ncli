@@ -66,20 +66,57 @@ impl fmt::Display for Base {
 #[serde(transparent)]
 pub struct RemoteBranch(String);
 
-impl fmt::Display for RemoteBranch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.strip_prefix(REMOTES).unwrap_or(&self.0))
+impl RemoteBranch {
+    pub(in crate::commands::code) fn remote(&self) -> &str {
+        self.short()
+            .split_once('/')
+            .map_or("", |(remote, _)| remote)
+    }
+
+    pub(in crate::commands::code) fn branch(&self) -> &str {
+        self.short()
+            .split_once('/')
+            .map_or("", |(_, branch)| branch)
+    }
+
+    fn short(&self) -> &str {
+        self.0.strip_prefix(REMOTES).unwrap_or(&self.0)
     }
 }
 
-struct Git<'a> {
+impl fmt::Display for RemoteBranch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.short())
+    }
+}
+
+pub(in crate::commands::code) struct Git<'a> {
     cli: Cli,
     cwd: &'a Path,
     cancellation: &'a Cancellation,
 }
 
-impl Git<'_> {
-    fn run(&self, args: &[&str]) -> Result<String, ProcessError> {
+impl<'a> Git<'a> {
+    pub(in crate::commands::code) fn new(cwd: &'a Path, cancellation: &'a Cancellation) -> Self {
+        Self {
+            cli: Cli::new(["git"]),
+            cwd,
+            cancellation,
+        }
+    }
+
+    pub(in crate::commands::code) fn toplevel(
+        cancellation: &Cancellation,
+    ) -> Result<PathBuf, Error> {
+        let git = Git::new(Path::new("."), cancellation);
+        process::require_executables([git.cli.executable()])?;
+        match git.run(&["rev-parse", "--show-toplevel"]) {
+            Err(error @ ProcessError::Exit { .. }) => Err(Error::NotAWorkTree(error)),
+            repo => Ok(PathBuf::from(repo?)),
+        }
+    }
+
+    pub(in crate::commands::code) fn run(&self, args: &[&str]) -> Result<String, ProcessError> {
         self.run_with_input(args, None)
     }
 
@@ -91,7 +128,7 @@ impl Git<'_> {
         Ok(output.strip_suffix('\n').unwrap_or(&output).to_owned())
     }
 
-    fn head(&self) -> Result<Head, ProcessError> {
+    pub(in crate::commands::code) fn head(&self) -> Result<Head, ProcessError> {
         let optional = |args: &[&str]| match self.run(args) {
             Err(ProcessError::Exit { code: 1, .. }) => Ok(None),
             found => found.map(Some),
@@ -100,6 +137,17 @@ impl Git<'_> {
             branch: optional(&["symbolic-ref", "--quiet", "HEAD"])?,
             commit: optional(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?,
         })
+    }
+
+    pub(in crate::commands::code) fn git_path(&self, name: &str) -> Result<PathBuf, ProcessError> {
+        Ok(self.cwd.join(self.run(&["rev-parse", "--git-path", name])?))
+    }
+
+    // A snapshot, unlike git status, sees untracked files that config hides, and refuses edits to
+    // files marked assume-unchanged or skip-worktree.
+    pub(in crate::commands::code) fn uncommitted(&self) -> Result<bool, Error> {
+        let snapshot = Worktree::snapshot(self.cancellation)?;
+        Ok(snapshot.tree != self.run(&["rev-parse", "HEAD^{tree}"])?)
     }
 
     fn empty_tree(&self) -> Result<String, ProcessError> {
@@ -119,9 +167,7 @@ impl Git<'_> {
             .tempdir()
             .map_err(Error::Snapshot)?;
         let index = dir.path().join("index");
-        let real_index = self
-            .cwd
-            .join(self.run(&["rev-parse", "--git-path", "index"])?);
+        let real_index = self.git_path("index")?;
         copy_index(&real_index, &index).map_err(Error::Snapshot)?;
         let git = Git {
             cli: Cli::new(["git"]).env("GIT_INDEX_FILE", &index),
@@ -249,7 +295,7 @@ impl Git<'_> {
         Ok(dirty)
     }
 
-    fn default_branch(&self) -> Result<RemoteBranch, Error> {
+    pub(in crate::commands::code) fn default_branch(&self) -> Result<RemoteBranch, Error> {
         let output = self.run(&["for-each-ref", "--format=%(refname) %(symref)", REMOTES])?;
         let mut heads: Vec<(&str, RemoteBranch)> = output
             .lines()
@@ -302,8 +348,8 @@ fn copy_index(from: &Path, to: &Path) -> io::Result<()> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
-    branch: Option<String>,
-    commit: Option<String>,
+    pub(in crate::commands::code) branch: Option<String>,
+    pub(in crate::commands::code) commit: Option<String>,
 }
 
 impl fmt::Display for Head {
@@ -348,17 +394,8 @@ impl Worktree {
     }
 
     fn take(earlier: Option<&Self>, cancellation: &Cancellation) -> Result<Self, Error> {
-        let git = Git {
-            cli: Cli::new(["git"]),
-            cwd: Path::new("."),
-            cancellation,
-        };
-        process::require_executables([git.cli.executable()])?;
-        let repo = match git.run(&["rev-parse", "--show-toplevel"]) {
-            Err(error @ ProcessError::Exit { .. }) => return Err(Error::NotAWorkTree(error)),
-            repo => PathBuf::from(repo?),
-        };
-        let git = Git { cwd: &repo, ..git };
+        let repo = Git::toplevel(cancellation)?;
+        let git = Git::new(&repo, cancellation);
         let head = git.head()?;
         let committed = match &head.commit {
             Some(head) => head.clone(),
@@ -400,11 +437,7 @@ impl Change {
             Error::NotAWorkTree(source) => Error::NoLocalChange(source),
             error => error,
         })?;
-        let git = Git {
-            cli: Cli::new(["git"]),
-            cwd: &repo,
-            cancellation,
-        };
+        let git = Git::new(&repo, cancellation);
         if tree != git.run(&["rev-parse", &format!("{}^{{tree}}", base.id())])? {
             return Ok(Self::Uncommitted {
                 repo,
