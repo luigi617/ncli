@@ -144,7 +144,7 @@ impl<'a> Git<'a> {
     }
 
     pub(in crate::commands::code) fn uncommitted(&self) -> Result<bool, ProcessError> {
-        // Explicit, since config can hide untracked files that a failed sync's clean would delete.
+        // Explicit, since config can hide the untracked files an agent left behind.
         Ok(!self
             .run(&["status", "--porcelain", "--untracked-files=normal"])?
             .is_empty())
