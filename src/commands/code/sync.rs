@@ -279,7 +279,8 @@ fn marker_size(git: &Git, path: &str) -> Result<usize, ProcessError> {
         .run(&["check-attr", "-z", "conflict-marker-size", "--", path])?
         .split('\0')
         .nth(2)
-        .and_then(|size| size.parse().ok())
+        .and_then(|size| size.parse::<i32>().ok())
+        .and_then(|size| usize::try_from(size).ok())
         .filter(|&size| size > 0)
         .unwrap_or(7))
 }
@@ -291,15 +292,17 @@ fn marker_lines(
     size: usize,
     stages: &[u8],
 ) -> Result<HashSet<String>, ProcessError> {
-    let separator = "=".repeat(size);
-    let markers = ['<', '|', '>'].map(|marker| marker.to_string().repeat(size));
+    let run = |line: &str, marker| line.bytes().take_while(|&byte| byte == marker).count();
     let mut lines = HashSet::new();
     for stage in stages {
         lines.extend(
             blob(git, &format!(":{stage}:{path}"))?
                 .lines()
                 .filter(|line| {
-                    *line == separator || markers.iter().any(|marker| line.starts_with(marker))
+                    (line.len() == size && run(line, b'=') == size)
+                        || [b'<', b'|', b'>']
+                            .into_iter()
+                            .any(|marker| run(line, marker) >= size)
                 })
                 .map(str::to_owned),
         );

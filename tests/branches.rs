@@ -414,6 +414,19 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$last"
         }
 
         #[test]
+        fn a_branch_without_a_tracking_ref_is_pushed_when_it_fast_forwards() {
+            let env = Env::new();
+            env.git(&["switch", "--quiet", "--create", "feat"]);
+            env.write("feature.rs", "\n");
+            env.commit("Feature.");
+            env.git(&["push", "--quiet", "origin", "feat"]);
+            env.git(&["update-ref", "-d", "refs/remotes/origin/feat"]);
+            env.write("more.rs", "\n");
+            env.succeed(&["code", "ship"], &[]);
+            assert_eq!(env.origin("feat"), env.git(&["rev-parse", "HEAD"]));
+        }
+
+        #[test]
         fn shipping_again_with_nothing_new_skips_the_agent() {
             let env = Env::new();
             env.feature(&["feature\n"]);
@@ -924,6 +937,22 @@ cd "$FAKE_SSH_ROOT" && exec sh -c "$last"
                 "{stderr}"
             );
             env.assert_put_back(&tip);
+        }
+
+        #[test]
+        fn a_marker_size_git_cannot_hold_counts_as_the_default() {
+            let env = Env::new();
+            env.write(
+                ".gitattributes",
+                "README.md conflict-marker-size=18446744073709551615\n",
+            );
+            env.commit("Attributes.");
+            env.git(&["push", "--quiet", "origin", "main"]);
+            fails_and_puts_back_in(
+                env,
+                "git add README.md",
+                "the agent left conflict markers in README.md",
+            );
         }
 
         #[test]

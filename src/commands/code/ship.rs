@@ -274,6 +274,10 @@ fn check_fetched(git: &Git, remote: &str, branch: &str) -> Result<Option<String>
         (None, Some(_)) => {
             git.run(&["update-ref", "-d", &tracking])?;
         }
+        // A single-branch or shallow clone keeps no tracking ref, so only a fast-forward is safe.
+        (Some(listed), None) if fast_forwards(git, listed)? => {
+            git.run(&["update-ref", &tracking, listed])?;
+        }
         (listed, fetched) if *listed != fetched => {
             return Err(Error::Unfetched {
                 remote: remote.to_owned(),
@@ -283,6 +287,19 @@ fn check_fetched(git: &Git, remote: &str, branch: &str) -> Result<Option<String>
         _ => {}
     }
     Ok(listed)
+}
+
+fn fast_forwards(git: &Git, from: &str) -> Result<bool, ProcessError> {
+    let commit = format!("{from}^{{commit}}");
+    if git
+        .optional(&["rev-parse", "--verify", "--quiet", &commit])?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    Ok(git
+        .optional(&["merge-base", "--is-ancestor", from, "HEAD"])?
+        .is_some())
 }
 
 // Pushing a branch that tracks another branch would leave that branch, and its pull request, behind.
