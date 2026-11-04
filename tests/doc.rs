@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 use std::process::Output;
 
-use common::{ncli, script};
+use common::{ncli, script, terminal_state};
 use ncli::error::Error;
 use tempfile::TempDir;
 
@@ -292,7 +292,11 @@ fn fix_needs_a_document_review_as_the_last_output() {
     let output = env.run(&["fix"], &[]);
     assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
     env.succeed(&["review", "We ship on Monday."], &[]);
-    fs::write(env.state.path().join("output.txt"), "something else").unwrap();
+    fs::write(
+        terminal_state(env.state.path()).join("output.txt"),
+        "something else",
+    )
+    .unwrap();
     let output = env.run(&["fix"], &[]);
     assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
     assert!(

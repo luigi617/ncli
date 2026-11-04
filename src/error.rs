@@ -147,7 +147,7 @@ pub enum Error {
         "unrecognized command `{0}`; quote a task to give it to an agent, for example: ncli \"fix the failing test\""
     )]
     NotATask(String),
-    #[error("there is no last output")]
+    #[error("there is no last output in this terminal")]
     NoOutput,
     #[error("no claude or codex sessions were active on {0}")]
     NoSessions(jiff::civil::Date),

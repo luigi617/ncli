@@ -62,6 +62,12 @@ pub fn ncli(state: &Path) -> Command {
     command
 }
 
+pub fn terminal_state(state: &Path) -> std::path::PathBuf {
+    let dir = ncli::state::terminal_dir(state);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 pub fn git(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(["-c", "user.name=ncli", "-c", "user.email=ncli@example.com"])

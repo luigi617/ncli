@@ -6,3 +6,4 @@ mod interrupt;
 pub mod process;
 pub mod state;
 mod stderr;
+mod terminal;

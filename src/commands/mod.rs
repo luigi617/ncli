@@ -61,7 +61,7 @@ impl Guidance {
 pub enum Command {
     #[command(subcommand)]
     Code(code::CodeCommand),
-    /// Copy the output of the last ncli command to the clipboard.
+    /// Copy the output of the last ncli command in this terminal to the clipboard.
     Copy,
     #[command(subcommand)]
     Doc(doc::DocCommand),

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fmt, fs};
 
 use crate::error::Error;
+use crate::terminal;
 
 pub const DIR_VAR: &str = "NCLI_STATE_DIR";
 
@@ -36,7 +37,15 @@ impl fmt::Display for Entry {
     }
 }
 
+pub fn terminal_dir(root: &Path) -> PathBuf {
+    root.join("terminals").join(terminal::id())
+}
+
 fn dir() -> Result<PathBuf, Error> {
+    root().map(|root| terminal_dir(&root))
+}
+
+fn root() -> Result<PathBuf, Error> {
     env::var_os(DIR_VAR)
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
@@ -76,8 +85,26 @@ pub fn save(entry: Entry, contents: &str) -> Result<(), Error> {
         .expect("an entry lives in the state directory");
     let mut file = tempfile::NamedTempFile::new_in(dir).map_err(error)?;
     file.write_all(contents.as_bytes()).map_err(error)?;
-    file.persist(path).map_err(|persist| error(persist.error))?;
+    file.persist(&path)
+        .map_err(|persist| error(persist.error))?;
+    remove_ended(dir);
     Ok(())
+}
+
+// Cleanup is best-effort: a folder ncli cannot remove must not make the save it follows fail.
+fn remove_ended(current: &Path) {
+    let terminals = current
+        .parent()
+        .expect("a terminal lives in the terminals directory");
+    let Ok(entries) = fs::read_dir(terminals) else {
+        return;
+    };
+    for terminal in entries.flatten() {
+        let ended = terminal.file_name().to_str().is_some_and(terminal::ended);
+        if ended && terminal.path() != current {
+            let _ = fs::remove_dir_all(terminal.path());
+        }
+    }
 }
 
 pub fn load(entry: Entry) -> Result<Option<Vec<u8>>, Error> {

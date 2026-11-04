@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 use std::process::Command;
 
-use common::ncli;
+use common::{ncli, terminal_state};
 use tempfile::TempDir;
 
 #[test]
@@ -15,7 +15,7 @@ fn copy_puts_text_on_the_windows_clipboard_intact() {
         "ok",
         "## ncli code review: 1 finding\n\n### 🔴 High: héllo wörld ✓",
     ] {
-        fs::write(state.path().join("output.txt"), text).unwrap();
+        fs::write(terminal_state(state.path()).join("output.txt"), text).unwrap();
         let output = ncli(state.path()).arg("copy").output().unwrap();
         assert!(output.status.success(), "{output:?}");
         let pasted = Command::new("powershell")

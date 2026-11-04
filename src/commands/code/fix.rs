@@ -10,7 +10,8 @@ use crate::state;
 /// Change the code in the current directory to address the review comments that hold up.
 #[derive(Debug, Args)]
 pub struct Fix {
-    /// URL of the pull request, or of one of its comments [default: the last output]
+    /// URL of the pull request, or of one of its comments [default: the last output in this
+    /// terminal]
     #[arg(value_parser = parse_link)]
     pub link: Option<String>,
     #[command(flatten)]
