@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-use common::{ncli, script};
+use common::{ncli, script, terminal_state};
 use ncli::error::Error;
 use tempfile::TempDir;
 
@@ -93,7 +93,7 @@ impl Env {
     }
 
     fn saved_output(&self) -> Option<String> {
-        fs::read_to_string(self.state.path().join("output.txt")).ok()
+        fs::read_to_string(terminal_state(self.state.path()).join("output.txt")).ok()
     }
 }
 
@@ -448,7 +448,11 @@ fn rename_refuses_a_missing_session_or_an_existing_name() {
 #[test]
 fn commands_other_than_ls_and_logs_keep_the_saved_output() {
     let env = Env::new();
-    fs::write(env.state.path().join("output.txt"), "earlier").unwrap();
+    fs::write(
+        terminal_state(env.state.path()).join("output.txt"),
+        "earlier",
+    )
+    .unwrap();
     for args in [
         &["kill", "work"][..],
         &["rename", "work", "play"],
@@ -458,7 +462,11 @@ fn commands_other_than_ls_and_logs_keep_the_saved_output() {
         env.sessions(args, SESSIONS);
     }
     assert_eq!(env.saved_output().as_deref(), Some("earlier"));
-    assert!(!env.state.path().join("failure.txt").exists());
+    assert!(
+        !terminal_state(env.state.path())
+            .join("failure.txt")
+            .exists()
+    );
 }
 
 #[test]

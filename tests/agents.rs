@@ -146,7 +146,7 @@ mod binary {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
 
-    use crate::common::{ncli, script};
+    use crate::common::{ncli, script, terminal_state};
     use ncli::error::Error;
     use tempfile::TempDir;
 
@@ -158,7 +158,7 @@ prompt=$(cat)
 case "$prompt" in
 *"judging a code review"*)
     [ -n "$FAKE_BAD_VERDICT" ] && { echo 'not a verdict'; exit 0; }
-    [ -n "$FAKE_BLOCK_REVIEW" ] && mkdir "$NCLI_STATE_DIR/review.json"
+    [ -n "$FAKE_BLOCK_REVIEW" ] && mkdir "$FAKE_BLOCK_REVIEW"
     echo '{"change_accessed": true, "findings": [{"severity": "low", "title": "Typo", "file": "README.md", "line": 1,
         "explanation": "A word is misspelled.", "fix": "Correct the spelling."}]}' ;;
 *"When you are done"*)
@@ -211,6 +211,10 @@ esac
                 script(env.bin.path(), name, body);
             }
             env
+        }
+
+        fn saved(&self, name: &str) -> PathBuf {
+            terminal_state(self.state.path()).join(name)
         }
 
         fn ncli(&self, args: &[&str]) -> Command {
@@ -356,7 +360,7 @@ esac
             assert_eq!(output.status.signal(), Some(libc::SIGINT));
             let expected = format!("ncli: error: {installed} was cancelled\nResume: {resume}");
             assert!(stderr(&output).contains(&expected), "{}", stderr(&output));
-            let saved = fs::read_to_string(env.state.path().join("failure.txt")).unwrap();
+            let saved = fs::read_to_string(env.saved("failure.txt")).unwrap();
             assert!(saved.starts_with(&expected), "{saved}");
         }
     }
@@ -364,7 +368,7 @@ esac
     #[test]
     fn a_failure_is_recorded_apart_from_the_last_successful_output() {
         let env = Env::new(&["claude"]);
-        let saved = || fs::read_to_string(env.state.path().join("failure.txt")).ok();
+        let saved = || fs::read_to_string(env.saved("failure.txt")).ok();
         env.run(&["copy"]);
         assert_eq!(saved(), None);
         let succeeded = env.succeed(&["fix the bug"]);
@@ -408,10 +412,10 @@ esac
         let output = task.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert!(stderr(&output).contains("could not write the output"));
-        let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
+        let saved = fs::read_to_string(env.saved("output.txt")).unwrap();
         assert!(saved.starts_with("claude did it\n\nResume: "), "{saved}");
         assert!(
-            !env.state.path().join("failure.txt").exists(),
+            !env.saved("failure.txt").exists(),
             "the write error would replace the saved output for copy"
         );
     }
@@ -421,30 +425,30 @@ esac
         let env = Env::new(&["claude", "codex"]);
         let output = env
             .ncli(&["code", "review", LINK])
-            .env("FAKE_BLOCK_REVIEW", "1")
+            .env("FAKE_BLOCK_REVIEW", env.saved("review.json"))
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert!(stderr(&output).contains("could not access the saved review"));
-        let saved = fs::read_to_string(env.state.path().join("output.txt")).unwrap();
+        let saved = fs::read_to_string(env.saved("output.txt")).unwrap();
         assert!(
             saved.starts_with("## ncli code review: 1 finding"),
             "{saved}"
         );
-        assert!(!env.state.path().join("failure.txt").exists());
+        assert!(!env.saved("failure.txt").exists());
     }
 
     #[test]
     fn a_failed_save_leaves_no_older_result_or_review_behind() {
         let env = Env::new(&["claude", "codex"]);
         env.succeed(&["code", "review", LINK]);
-        fs::write(env.state.path().join("failure.txt"), "ncli: error: older").unwrap();
-        fs::remove_file(env.state.path().join("output.txt")).unwrap();
-        fs::create_dir(env.state.path().join("output.txt")).unwrap();
+        fs::write(env.saved("failure.txt"), "ncli: error: older").unwrap();
+        fs::remove_file(env.saved("output.txt")).unwrap();
+        fs::create_dir(env.saved("output.txt")).unwrap();
         let output = env.run(&["code", "review", LINK]);
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
-        assert!(!env.state.path().join("failure.txt").exists());
-        assert!(!env.state.path().join("review.json").exists());
+        assert!(!env.saved("failure.txt").exists());
+        assert!(!env.saved("review.json").exists());
         let publish = env.run(&["code", "publish-comment"]);
         assert!(stderr(&publish).contains("there is no review to publish"));
     }
@@ -517,7 +521,7 @@ esac
         unsafe { libc::kill(publish.id() as libc::pid_t, libc::SIGINT) };
         let output = publish.wait_with_output().unwrap();
         assert!(!stderr(&output).contains("error:"), "{}", stderr(&output));
-        let saved = fs::read_to_string(env.state.path().join("failure.txt")).unwrap();
+        let saved = fs::read_to_string(env.saved("failure.txt")).unwrap();
         assert_eq!(
             saved,
             "ncli code publish-comment: error: claude was cancelled"
@@ -578,7 +582,7 @@ esac
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert_eq!(
             stderr(&output).trim(),
-            "ncli code fix: error: there is no last output"
+            "ncli code fix: error: there is no last output in this terminal"
         );
         assert!(env.logged("claude.prompt").is_none());
 
@@ -606,12 +610,111 @@ esac
     }
 
     #[test]
+    fn fix_without_a_link_uses_only_the_last_output_of_its_own_terminal() {
+        use std::os::unix::process::CommandExt;
+
+        let env = Env::new(&["claude"]);
+        let here = env.succeed(&["fix the bug"]);
+        let mut elsewhere = env.ncli(&["code", "fix"]);
+        unsafe {
+            elsewhere.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = elsewhere.output().unwrap();
+        assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
+        assert_eq!(
+            stderr(&output).trim(),
+            "ncli code fix: error: there is no last output in this terminal"
+        );
+
+        env.succeed(&["code", "fix"]);
+        let prompt = env.logged("claude.prompt").unwrap();
+        assert!(
+            prompt.contains(&format!("<output>\n{here}</output>")),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn saving_removes_the_state_of_terminals_that_ended_and_keeps_open_ones() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let env = Env::new(&["claude"]);
+        let in_new_session = |command: &mut Command| unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        };
+        let terminals = || {
+            fs::read_dir(env.state.path().join("terminals"))
+                .unwrap()
+                .count()
+        };
+
+        let mut ended = env.ncli(&["code", "fix"]);
+        in_new_session(&mut ended);
+        ended.output().unwrap();
+        let ncli = env.ncli(&[]);
+        let mut open = Command::new("sh");
+        open.args(["-c", "\"$0\" code fix; echo saved; read line"])
+            .arg(ncli.get_program())
+            .envs(
+                ncli.get_envs()
+                    .filter_map(|(key, value)| Some((key, value?))),
+            )
+            .current_dir(env.work.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        in_new_session(&mut open);
+        let mut open = open.spawn().unwrap();
+        let mut saved = String::new();
+        BufReader::new(open.stdout.take().unwrap())
+            .read_line(&mut saved)
+            .unwrap();
+        assert_eq!(saved, "saved\n");
+        assert_eq!(terminals(), 1);
+
+        env.succeed(&["fix the bug"]);
+        assert_eq!(terminals(), 2);
+        assert!(env.saved("output.txt").exists());
+
+        open.stdin.take().unwrap().write_all(b"\n").unwrap();
+        open.wait().unwrap();
+        env.succeed(&["fix the bug"]);
+        assert_eq!(terminals(), 1);
+    }
+
+    #[test]
+    fn a_closed_terminal_that_cannot_be_removed_does_not_fail_the_save() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = Env::new(&["claude"]);
+        let stale = env.state.path().join("terminals").join("999999");
+        fs::create_dir_all(stale.join("x")).unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o000)).unwrap();
+
+        env.succeed(&["fix the bug"]);
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(env.saved("output.txt").exists());
+    }
+
+    #[test]
     fn a_new_state_directory_is_private_and_an_existing_one_is_left_alone() {
         use std::os::unix::fs::PermissionsExt;
 
         let env = Env::new(&["claude"]);
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        let new = env.state.path().join("new");
+        let new = env.saved("new");
         let output = env
             .ncli(&["fix the bug"])
             .env(ncli::state::DIR_VAR, &new)
@@ -663,7 +766,7 @@ esac
     #[test]
     fn publish_comment_rejects_a_review_without_findings_or_a_corrupt_one() {
         let env = Env::new(&["claude"]);
-        let review = env.state.path().join("review.json");
+        let review = env.saved("review.json");
         let rerun = "; run `ncli code review` again";
         for (saved, prefix, suffix) in [
             (
@@ -706,7 +809,7 @@ esac
         assert_eq!(output.status.code(), Some(Error::FAILURE.into()));
         assert_eq!(
             stderr(&output).trim(),
-            "ncli copy: error: there is no last output"
+            "ncli copy: error: there is no last output in this terminal"
         );
 
         let printed = env.succeed(&["fix the bug"]);

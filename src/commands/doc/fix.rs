@@ -9,8 +9,8 @@ use crate::error::Error;
 /// Revise a document to address the review comments that hold up.
 #[derive(Debug, Args)]
 pub struct Fix {
-    /// URL of the document, or of one of its comments [default: the last output, from `ncli doc
-    /// review` or `ncli doc write`]
+    /// URL of the document, or of one of its comments [default: the last output in this
+    /// terminal, from `ncli doc review` or `ncli doc write`]
     #[arg(value_parser = parse_link)]
     pub link: Option<String>,
     #[command(flatten)]

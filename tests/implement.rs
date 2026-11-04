@@ -7,7 +7,7 @@ mod binary {
     use std::path::Path;
     use std::process::{Command, Output};
 
-    use crate::common::{git, ncli, script};
+    use crate::common::{git, ncli, script, terminal_state};
     use ncli::error::Error;
     use tempfile::TempDir;
 
@@ -153,7 +153,7 @@ esac
         }
 
         fn saved(&self, name: &str) -> bool {
-            self.state.path().join(name).exists()
+            terminal_state(self.state.path()).join(name).exists()
         }
 
         fn head(&self) -> (String, String) {
